@@ -1,0 +1,988 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>门禁事件查询</title>
+  <style>
+    :root {
+      --border: #d9dee5;
+      --head: #f5f7fa;
+      --accent: #1a73e8;
+      --muted: #6b7280;
+      --danger: #d93025;
+      --ok: #188038;
+      --warn: #b06000;
+      --bg: #f6f8fb;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 18px;
+      background: var(--bg);
+      color: #1f2937;
+      font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+    }
+
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    h2 { margin: 0 0 10px; font-size: 15px; color: #374151; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+    label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #4b5563; }
+    input, select {
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font: inherit;
+      min-width: 150px;
+      background: #fff;
+    }
+    input[type="checkbox"] { min-width: auto; }
+    label.check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #374151; padding-bottom: 7px; }
+    button {
+      padding: 7px 14px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: #fff;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    button:hover { filter: brightness(0.97); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .quick { display: flex; gap: 8px; flex-wrap: wrap; }
+    .quick button { padding: 4px 10px; font-size: 12px; }
+
+    .tableWrap { overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+    table { border-collapse: collapse; width: 100%; white-space: nowrap; }
+    th, td { border-bottom: 1px solid var(--border); padding: 7px 10px; text-align: left; }
+    th { background: var(--head); font-weight: 600; color: #374151; position: sticky; top: 0; z-index: 1; }
+    tbody tr:hover { background: #f0f6ff; }
+    td.wrap { white-space: normal; max-width: 320px; }
+    .tag {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-size: 12px;
+      background: #eef2f7;
+      color: #4b5563;
+    }
+    .tag.ok { background: #e6f4ea; color: var(--ok); }
+    .tag.warn { background: #fef7e0; color: var(--warn); }
+    .tag.err { background: #fce8e6; color: var(--danger); }
+    .tag.acs { background: #e8f0fe; color: var(--accent); }
+
+    .pager { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+    .msg { margin-top: 10px; padding: 9px 12px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; }
+    .msg.err { background: #fce8e6; color: #a50e0e; border: 1px solid #f5c2c0; }
+    .msg.ok { background: #e6f4ea; color: #0d652d; border: 1px solid #b7e1c4; }
+    .msg.warn { background: #fef7e0; color: #8a5300; border: 1px solid #f7d99b; }
+    .hidden { display: none !important; }
+
+    .statusGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+    .statusItem { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: #fcfdff; }
+    .statusItem .k { font-size: 12px; color: var(--muted); }
+    .statusItem .v { font-size: 15px; font-weight: 600; margin-top: 2px; }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(17, 24, 39, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 50;
+    }
+    .modalBox {
+      background: #fff;
+      border-radius: 8px;
+      max-width: 900px;
+      width: 100%;
+      max-height: 86vh;
+      overflow: auto;
+      padding: 18px 20px;
+    }
+    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 13px; }
+    .kv .k { color: var(--muted); }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 6px;
+      overflow: auto;
+      max-height: 45vh;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    details summary { cursor: pointer; font-weight: 600; color: #374151; }
+    details[open] summary { margin-bottom: 10px; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>门禁事件查询</h1>
+    <div class="muted">
+      数据来源：<code>GET /api/events</code>（消息队列消费后写入 EventStore 的事件）；时间均为<b>北京时间</b>。
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="field">服务地址
+        <input id="baseUrl" placeholder="http://localhost:5180">
+      </label>
+      <button id="refreshStatusBtn">刷新链路状态</button>
+      <button id="refreshFacetsBtn">刷新查询选项</button>
+      <label class="check"><input type="checkbox" id="autoRefresh"> 每 10 秒自动刷新状态</label>
+    </div>
+    <div id="statusMsg" class="msg hidden"></div>
+  </div>
+
+  <div class="card">
+    <h2>链路状态（队列 → 消费者 → 数据库）</h2>
+    <div id="statusGrid" class="statusGrid"></div>
+    <div id="schemaMsg" class="msg hidden"></div>
+  </div>
+
+  <div class="card">
+    <h2>查询条件</h2>
+    <form id="queryForm">
+      <div class="row">
+        <label class="field">设备 ID<input id="qDeviceId" placeholder="如 FZ7955795"></label>
+        <label class="field">工号<input id="qEmployeeNo" placeholder="精确匹配"></label>
+        <label class="field">卡号<input id="qCardNo" placeholder="精确匹配"></label>
+        <label class="field">主类型
+          <select id="qMajor">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="field">次类型
+          <select id="qMinor">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="field">事件类型
+          <select id="qEventType">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="field" id="qEventTypeCustomWrap" style="display:none">自定义事件类型
+          <input id="qEventTypeCustom" placeholder="报文里的 eventType 原值">
+        </label>
+        <label class="field">来源
+          <select id="qSource">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="field">认证方式
+          <select id="qVerifyMode">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="field">报文关键字<input id="qKeyword" placeholder="模糊匹配原文"></label>
+        <label class="field">起始时间<input id="qFrom" type="datetime-local"></label>
+        <label class="field">结束时间<input id="qTo" type="datetime-local"></label>
+        <label class="field">每页条数<input id="qLimit" type="number" min="1" max="1000" value="20"></label>
+        <label class="field">排序
+          <select id="qOrder">
+            <option value="">时间倒序（最新在前）</option>
+            <option value="true">时间正序</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="qAcsOnly"> 只看门禁事件</label>
+        <label class="check"><input type="checkbox" id="qIncludePayload" checked> 返回报文原文</label>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button type="submit" class="primary">查询</button>
+        <button type="button" id="resetBtn">重置</button>
+        <div class="quick">
+          <button type="button" data-range="today">今天</button>
+          <button type="button" data-range="1h">最近 1 小时</button>
+          <button type="button" data-range="24h">最近 24 小时</button>
+          <button type="button" data-range="7d">最近 7 天</button>
+        </div>
+      </div>
+      <div class="hint">时间留空表示不限；填值按北京时间解释（无需写时区）。</div>
+    </form>
+    <div id="queryMsg" class="msg hidden"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 id="resultTitle" style="margin:0">查询结果</h2>
+      <div class="muted" id="resultSummary"></div>
+    </div>
+    <div class="tableWrap" style="margin-top:10px">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>事件时间</th>
+            <th>设备</th>
+            <th>主类型</th>
+            <th>次类型</th>
+            <th>工号</th>
+            <th>姓名</th>
+            <th>卡号</th>
+            <th>门号</th>
+            <th>认证方式</th>
+            <th>来源</th>
+            <th>门禁</th>
+            <th>队列</th>
+            <th>投递</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="eventsBody"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button id="prevBtn" disabled>上一页</button>
+      <button id="nextBtn" disabled>下一页</button>
+      <span class="muted" id="pageInfo"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>运维操作：手工补录事件 / 手动对账补漏 / 重放落盘文件</summary>
+
+      <h2 style="margin-top:6px">手工补录（POST /api/events/manual）</h2>
+      <form id="manualForm">
+        <div class="row">
+          <label class="field">设备 ID <b style="color:#d93025">*</b><input id="mDeviceId" placeholder="必填，如 FZ7955795"></label>
+          <label class="field">事件序号<input id="mSerialNo" placeholder="用于去重，可留空"></label>
+          <label class="field">事件时间<input id="mEventTime" type="datetime-local"></label>
+          <label class="field">主类型
+            <select id="mMajor">
+              <option value="5">5 门禁事件</option>
+              <option value="1">1 报警</option>
+              <option value="2">2 异常</option>
+              <option value="3">3 操作</option>
+            </select>
+          </label>
+          <label class="field">次类型
+            <select id="mMinor">
+              <option value="1">1 刷卡开锁</option>
+              <option value="75">75 人脸开锁</option>
+              <option value="76">76 人脸认证失败</option>
+              <option value="21">21 门锁打开</option>
+              <option value="22">22 门锁关闭</option>
+              <option value="6">6 未分配权限</option>
+              <option value="7">7 无效时段</option>
+              <option value="8">8 卡号过期</option>
+              <option value="9">9 无此卡号</option>
+              <option value="1024">1024 中心平台开锁</option>
+            </select>
+          </label>
+          <label class="field">工号<input id="mEmployeeNo"></label>
+          <label class="field">姓名<input id="mPersonName"></label>
+          <label class="field">卡号<input id="mCardNo"></label>
+          <label class="field">门号<input id="mDoorNo" type="number" min="0" value="1"></label>
+          <label class="field">认证方式
+            <select id="mVerifyMode">
+              <option value="card">card 刷卡</option>
+              <option value="face">face 人脸</option>
+              <option value="fingerprint">fingerprint 指纹</option>
+              <option value="">（留空）</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="mDirect"> 绕过队列直接写库（direct=true）</label>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button type="submit" class="primary">补录</button>
+          <span class="muted">默认走 去重 → 落盘 → 消息队列 → 入库；示例：漏报补录、从旧系统导入历史通行记录。</span>
+        </div>
+      </form>
+      <div id="manualMsg" class="msg hidden"></div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+
+      <h2>手动对账补漏（POST /api/events/reconcile）</h2>
+      <div class="row">
+        <label class="field">回看秒数<input id="rLookback" type="number" min="60" value="3600"></label>
+        <label class="field">设备 ID<input id="rDeviceId" placeholder="可留空=全部在线设备"></label>
+        <button id="reconcileBtn">立即对账</button>
+        <span class="muted">从设备本地事件表拉取平台漏收的历史事件（需设备在线且为 OTAP 协议）。</span>
+      </div>
+      <div id="reconcileMsg" class="msg hidden"></div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+
+      <h2>重放落盘文件（POST /api/events/replay-spool）</h2>
+      <div class="row">
+        <label class="field">最近天数<input id="sDays" type="number" min="0" value="2"></label>
+        <button id="replayBtn">开始重放</button>
+        <span class="muted">把落盘 JSONL 中尚未入库的事件补入库（按去重键幂等，不会产生重复行）。</span>
+      </div>
+      <div id="replayMsg" class="msg hidden"></div>
+    </details>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modalBox">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <h2 style="margin:0">事件详情</h2>
+        <button id="modalClose">关闭</button>
+      </div>
+      <div id="modalBody" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <script>
+    // ---------------------------------------------------------------------------
+    // 中文映射（次类型来自海康云开放平台《设备本地事件查询》major=5 对照表；
+    // 个别型号语义可能不同，以现场实测为准）
+    // ---------------------------------------------------------------------------
+    const MAJOR_TEXT = {
+      0: '全部 / 未分类',
+      1: '报警',
+      2: '异常',
+      3: '操作',
+      5: '门禁事件'
+    };
+
+    const MINOR_TEXT = {
+      1: '刷卡开锁',
+      6: '未分配权限',
+      7: '无效时段',
+      8: '卡号过期',
+      9: '无此卡号',
+      21: '门锁打开',
+      22: '门锁关闭',
+      25: '按钮呼叫 / 开门请求（部分型号）',
+      75: '人脸开锁',
+      76: '人脸认证失败',
+      1024: '中心平台开锁'
+    };
+
+    const SOURCE_TEXT = {
+      HttpPush: '设备 HTTP 推送',
+      OtapJson: 'AMS · OTAP 报文',
+      Isapi: 'AMS · ISAPI 报文',
+      EHome: 'AMS · EHome 报文',
+      Exception: 'AMS · 异常回调',
+      Reconcile: '历史对账补漏',
+      Manual: '手工补录',
+      Msmq: 'MSMQ 消息',
+      RabbitMq: 'RabbitMQ 消息'
+    };
+
+    const VERIFY_TEXT = {
+      card: '刷卡',
+      face: '人脸',
+      fp: '指纹',
+      fingerprint: '指纹',
+      cardAndFp: '刷卡 + 指纹',
+      cardAndFace: '刷卡 + 人脸',
+      faceAndFp: '人脸 + 指纹',
+      idCard: '身份证',
+      qrCode: '二维码',
+      bluetooth: '蓝牙',
+      psw: '密码',
+      manual: '手动',
+      center: '中心平台',
+      button: '开门按钮'
+    };
+
+    const PROVIDER_TEXT = {
+      None: '进程内直通',
+      Msmq: 'MSMQ',
+      RabbitMq: 'RabbitMQ'
+    };
+
+    const DB_PROVIDER_TEXT = {
+      Sqlite: 'SQLite',
+      MySql: 'MySQL / MariaDB',
+      SqlServer: 'SQL Server'
+    };
+
+    const FORMAT_TEXT = { json: 'JSON', xml: 'XML', struct: '结构体', binary: '二进制' };
+
+    // 事件类型的中文说明（值本身是英文枚举，这里补一层中文注解）
+    const EVENT_TYPE_TEXT = {
+      AccessControllerEvent: 'AccessControllerEvent · 设备上报的门禁事件',
+      AcsEvent: 'AcsEvent · 平台/对账通道的门禁事件'
+    };
+
+    // 库中还没有数据时，下拉里先用这些常见值兜底（不参与筛选逻辑，仅作为可选项）
+    const MAJOR_FALLBACK = ['5', '1', '2', '3'];
+    const MINOR_FALLBACK = ['1', '6', '7', '8', '9', '21', '22', '75', '76', '1024'];
+    const EVENT_TYPE_FALLBACK = ['AccessControllerEvent', 'AcsEvent'];
+    const SOURCE_FALLBACK = ['HttpPush', 'OtapJson', 'Isapi', 'EHome', 'Reconcile', 'Manual', 'Exception'];
+    const VERIFY_FALLBACK = ['card', 'face', 'fingerprint'];
+
+    function majorLabel(value) {
+      const name = MAJOR_TEXT[value];
+      return name ? (value + ' ' + name) : ('主类型 ' + value + '（未在已知对照表中）');
+    }
+
+    function minorLabel(value) {
+      const name = MINOR_TEXT[value];
+      return name ? (value + ' ' + name) : ('次类型 ' + value + '（未在已知对照表中）');
+    }
+
+    const MANUAL_STATUS_TEXT = {
+      Accepted: '已受理（已入队）',
+      Duplicate: '重复跳过',
+      Stored: '已入库',
+      Rejected: '被拒绝'
+    };
+
+    const EMPTY = '—';
+
+    // ---------------------------------------------------------------------------
+    // 工具
+    // ---------------------------------------------------------------------------
+    const $ = (id) => document.getElementById(id);
+
+    function text(value, map) {
+      if (value === null || value === undefined || value === '') return EMPTY;
+      const key = String(value);
+      if (map && map[key]) return map[key];
+      if (map && map[Number(key)] !== undefined && !isNaN(Number(key))) return map[Number(key)];
+      return key;
+    }
+
+    function pick(map, value) {
+      if (value === null || value === undefined || value === '') return '';
+      return map[value] !== undefined ? map[value] : '';
+    }
+
+    function fmtTime(value) {
+      if (!value) return EMPTY;
+      // 后端已按北京时间返回（带 +08:00），这里只做显示裁剪
+      return String(value).replace('T', ' ').slice(0, 19);
+    }
+
+    function esc(value) {
+      return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function toLocalInput(date) {
+      const p = (n) => String(n).padStart(2, '0');
+      return date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) +
+        'T' + p(date.getHours()) + ':' + p(date.getMinutes());
+    }
+
+    function baseUrl() {
+      const value = ($('baseUrl').value || '').trim().replace(/\/+$/, '');
+      return value || location.origin;
+    }
+
+    function msg(el, type, message) {
+      el.className = 'msg ' + type;
+      el.textContent = message;
+      el.classList.remove('hidden');
+    }
+
+    function hide(el) { el.classList.add('hidden'); }
+
+    async function api(path, options) {
+      const response = await fetch(baseUrl() + path, options);
+      let body = null;
+      try { body = await response.json(); } catch (e) { body = null; }
+
+      if (!response.ok || (body && body.success === false)) {
+        const message = (body && body.message) ? body.message : ('HTTP ' + response.status + ' ' + response.statusText);
+        const error = new Error(message);
+        error.status = response.status;
+        error.body = body;
+        throw error;
+      }
+
+      return body ? body.data : null;
+    }
+
+    // ---------------------------------------------------------------------------
+    // 链路状态
+    // ---------------------------------------------------------------------------
+    let statusTimer = null;
+
+    async function loadStatus() {
+      const grid = $('statusGrid');
+      const schemaMsg = $('schemaMsg');
+      hide($('statusMsg'));
+
+      try {
+        const s = await api('/api/events/status');
+        const store = s.store || {};
+        const queue = s.queue || {};
+        const producer = s.producer || {};
+        const consumer = s.consumer || {};
+        const queueStats = queue.statistics || {};
+
+        const items = [
+          ['队列后端', queue.enabled ? text(queue.provider, PROVIDER_TEXT) : '未启用'],
+          ['队列就绪', queueStats.ready ? '是' : '否'],
+          ['队列名', queue.queueName || EMPTY],
+          ['已投递 / 失败', (producer.published || 0) + ' / ' + (producer.failed || 0)],
+          ['待发缓冲', producer.pending || 0],
+          ['已消费消息', consumer.consumed || 0],
+          ['已入库行数', consumer.stored || 0],
+          ['重复跳过', consumer.duplicates || 0],
+          ['重投 / 死信', (consumer.retried || 0) + ' / ' + (consumer.deadLettered || 0)],
+          ['数据库', text(store.provider, DB_PROVIDER_TEXT) + ' · ' + (store.tableName || EMPTY)],
+          ['表结构就绪', store.schemaReady ? '是' : '否'],
+          ['库中总行数', store.totalRows === null || store.totalRows === undefined ? EMPTY : store.totalRows],
+          ['最近入库', fmtTime(store.lastStoredAt)],
+          ['最近取件', fmtTime(consumer.lastConsumedAt)]
+        ];
+
+        grid.innerHTML = items.map(function (item) {
+          return '<div class="statusItem"><div class="k">' + esc(item[0]) + '</div><div class="v">' + esc(item[1]) + '</div></div>';
+        }).join('');
+
+        if (store.schemaReady === false) {
+          msg(schemaMsg, 'err', '事件表当前不可用，事件将无法入库：\n' + (store.schemaError || '（无详细原因）'));
+        } else if (store.lastError) {
+          msg(schemaMsg, 'warn', '数据库最近一次错误：' + store.lastError);
+        } else if (consumer.lastError) {
+          msg(schemaMsg, 'warn', '消费者最近一次错误：' + consumer.lastError);
+        } else if (queueStats.ready === false) {
+          msg(schemaMsg, 'warn', '消息队列未就绪：' + (queueStats.lastError || '（无详细原因）'));
+        } else {
+          hide(schemaMsg);
+        }
+      } catch (e) {
+        grid.innerHTML = '';
+        msg($('statusMsg'), 'err', '读取链路状态失败：' + e.message + '\n（请确认服务地址是否正确、服务是否已启动）');
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // 查询
+    // ---------------------------------------------------------------------------
+    let page = { limit: 20, offset: 0, total: 0, items: [] };
+
+    // ---------------------------------------------------------------------------
+    // 查询选项（下拉）：选项来自库里实际出现过的值，库为空时用内置常见值兜底
+    // ---------------------------------------------------------------------------
+    function fillSelect(id, items, labelOf, fallback, allowCustom) {
+      const select = $(id);
+      const previous = select.value;
+      const seen = {};
+      let html = '<option value="">全部</option>';
+
+      (items || []).forEach(function (item) {
+        const value = item && item.value ? String(item.value) : '';
+        if (!value || seen[value]) return;
+        seen[value] = true;
+        html += '<option value="' + esc(value) + '">' + esc(labelOf(value)) + '（' + (item.count || 0) + '）</option>';
+      });
+
+      (fallback || []).forEach(function (value) {
+        if (seen[value]) return;
+        seen[value] = true;
+        html += '<option value="' + esc(value) + '">' + esc(labelOf(value)) + '（库中暂无）</option>';
+      });
+
+      if (allowCustom) {
+        html += '<option value="__custom__">自定义…</option>';
+      }
+
+      select.innerHTML = html;
+
+      if (previous && seen[previous]) {
+        select.value = previous;
+      } else if (previous === '__custom__' && allowCustom) {
+        select.value = '__custom__';
+      }
+    }
+
+    function onEventTypeChanged() {
+      const custom = $('qEventType').value === '__custom__';
+      $('qEventTypeCustomWrap').style.display = custom ? '' : 'none';
+      if (!custom) $('qEventTypeCustom').value = '';
+    }
+
+    function currentEventType() {
+      const select = $('qEventType');
+      return select.value === '__custom__' ? $('qEventTypeCustom').value.trim() : select.value;
+    }
+
+    async function loadFacets(showMessage) {
+      try {
+        const facets = await api('/api/events/facets?limit=100');
+
+        fillSelect('qMajor', facets.majors, majorLabel, MAJOR_FALLBACK, false);
+        fillSelect('qMinor', facets.minors, minorLabel, MINOR_FALLBACK, false);
+        fillSelect('qEventType', facets.eventTypes, function (v) { return EVENT_TYPE_TEXT[v] || v; }, EVENT_TYPE_FALLBACK, true);
+        fillSelect('qSource', facets.sources, function (v) { return SOURCE_TEXT[v] || v; }, SOURCE_FALLBACK, false);
+        fillSelect('qVerifyMode', facets.verifyModes, function (v) { return VERIFY_TEXT[v] || v; }, VERIFY_FALLBACK, false);
+        onEventTypeChanged();
+
+        if (showMessage) {
+          const empty = (facets.totalRows || 0) === 0;
+          msg($('queryMsg'), empty ? 'warn' : 'ok',
+            '查询选项已刷新（库中 ' + (facets.totalRows || 0) + ' 条）：主类型 ' + (facets.majors || []).length +
+            ' 种、次类型 ' + (facets.minors || []).length + ' 种、来源 ' + (facets.sources || []).length +
+            ' 种、认证方式 ' + (facets.verifyModes || []).length + ' 种' +
+            (empty ? '。库里暂时没有数据，当前选项为内置常见值' : ''));
+        }
+      } catch (e) {
+        // 表不可用等异常不阻断查询：下拉退化为内置常见值，并把原因告诉用户
+        fillSelect('qMajor', [], majorLabel, MAJOR_FALLBACK, false);
+        fillSelect('qMinor', [], minorLabel, MINOR_FALLBACK, false);
+        fillSelect('qEventType', [], function (v) { return EVENT_TYPE_TEXT[v] || v; }, EVENT_TYPE_FALLBACK, true);
+        fillSelect('qSource', [], function (v) { return SOURCE_TEXT[v] || v; }, SOURCE_FALLBACK, false);
+        fillSelect('qVerifyMode', [], function (v) { return VERIFY_TEXT[v] || v; }, VERIFY_FALLBACK, false);
+        onEventTypeChanged();
+
+        if (showMessage) {
+          msg($('queryMsg'), 'err', '读取查询选项失败：' + e.message + '（下拉已退化为内置常见值）');
+        }
+      }
+    }
+
+    function buildQuery() {
+      const params = new URLSearchParams();
+      const add = (key, value) => { if (value !== '' && value !== null && value !== undefined) params.set(key, value); };
+
+      add('deviceId', $('qDeviceId').value.trim());
+      add('employeeNo', $('qEmployeeNo').value.trim());
+      add('cardNo', $('qCardNo').value.trim());
+      add('eventType', currentEventType());
+      add('major', $('qMajor').value);
+      add('minor', $('qMinor').value);
+      add('source', $('qSource').value);
+      add('verifyMode', $('qVerifyMode').value);
+      add('keyword', $('qKeyword').value.trim());
+      add('from', $('qFrom').value ? $('qFrom').value + ':00' : '');
+      add('to', $('qTo').value ? $('qTo').value + ':59' : '');
+      add('orderAscending', $('qOrder').value);
+      if ($('qAcsOnly').checked) add('accessControlOnly', 'true');
+      params.set('includePayload', $('qIncludePayload').checked ? 'true' : 'false');
+      params.set('limit', String(page.limit));
+      params.set('offset', String(page.offset));
+      return params;
+    }
+
+    async function runQuery(resetOffset) {
+      hide($('queryMsg'));
+      if (resetOffset) page.offset = 0;
+      page.limit = Math.min(Math.max(parseInt($('qLimit').value || '20', 10) || 20, 1), 1000);
+
+      const body = $('eventsBody');
+      body.innerHTML = '<tr><td colspan="15" class="muted">查询中…</td></tr>';
+
+      try {
+        const data = await api('/api/events?' + buildQuery().toString());
+        page.total = data.total || 0;
+        page.items = data.items || [];
+
+        renderRows();
+        renderPager();
+
+        $('resultSummary').textContent = '共 ' + page.total + ' 条，本页 ' + page.items.length + ' 条（第 ' +
+          (page.items.length ? page.offset + 1 : 0) + ' - ' + (page.offset + page.items.length) + ' 条）';
+      } catch (e) {
+        body.innerHTML = '';
+        renderPager();
+        msg($('queryMsg'), 'err', '查询失败：' + e.message);
+      }
+    }
+
+    function renderRows() {
+      const body = $('eventsBody');
+      if (!page.items.length) {
+        body.innerHTML = '<tr><td colspan="15" class="muted">没有符合条件的记录</td></tr>';
+        return;
+      }
+
+      body.innerHTML = page.items.map(function (e) {
+        const hasMinor = e.minor !== null && e.minor !== undefined && e.minor !== '';
+        const minorName = hasMinor ? (MINOR_TEXT[e.minor] || '未知') : '';
+        const minorHint = MINOR_TEXT[e.minor] ? '' : '（未在已知对照表中，以设备实测为准）';
+        const minorCell = hasMinor
+          ? '<span class="tag acs" title="次类型原始值 ' + esc(e.minor) + minorHint + '">' +
+            esc(minorName) + '（' + esc(e.minor) + '）</span>'
+          : esc(EMPTY);
+
+        const hasMajor = e.major !== null && e.major !== undefined && e.major !== '';
+        const majorCell = hasMajor ? esc(MAJOR_TEXT[e.major] || ('未知(' + e.major + ')')) : esc(EMPTY);
+
+        return '<tr>' +
+          '<td>' + esc(e.id) + '</td>' +
+          '<td>' + esc(fmtTime(e.eventTime)) + '</td>' +
+          '<td>' + esc(e.deviceId) + '</td>' +
+          '<td>' + majorCell + '</td>' +
+          '<td>' + minorCell + '</td>' +
+          '<td>' + esc(e.employeeNo || EMPTY) + '</td>' +
+          '<td>' + esc(e.personName || EMPTY) + '</td>' +
+          '<td>' + esc(e.cardNo || EMPTY) + '</td>' +
+          '<td>' + esc(e.doorNo === null || e.doorNo === undefined ? EMPTY : e.doorNo) + '</td>' +
+          '<td>' + esc(e.verifyMode ? (VERIFY_TEXT[e.verifyMode] || e.verifyMode) : EMPTY) + '</td>' +
+          '<td>' + esc(text(e.source, SOURCE_TEXT)) + '</td>' +
+          '<td>' + (e.isAccessControl ? '<span class="tag acs">门禁</span>' : '<span class="tag">其它</span>') + '</td>' +
+          '<td>' + esc(text(e.queueProvider, PROVIDER_TEXT)) + '</td>' +
+          '<td>' + esc(e.deliveryAttempts === null || e.deliveryAttempts === undefined ? EMPTY : e.deliveryAttempts) + '</td>' +
+          '<td><button type="button" data-id="' + esc(e.id) + '">查看</button></td>' +
+          '</tr>';
+      }).join('');
+
+      body.querySelectorAll('button[data-id]').forEach(function (button) {
+        button.addEventListener('click', function () { showDetail(button.getAttribute('data-id')); });
+      });
+    }
+
+    function renderPager() {
+      $('prevBtn').disabled = page.offset <= 0;
+      $('nextBtn').disabled = page.offset + page.items.length >= page.total;
+
+      const from = page.total === 0 ? 0 : page.offset + 1;
+      const to = page.offset + page.items.length;
+      $('pageInfo').textContent = '第 ' + from + ' - ' + to + ' 条 / 共 ' + page.total + ' 条';
+    }
+
+    // ---------------------------------------------------------------------------
+    // 详情
+    // ---------------------------------------------------------------------------
+    async function showDetail(id) {
+      try {
+        const e = await api('/api/events/' + encodeURIComponent(id) + '?includePayload=true');
+        const kv = [
+          ['ID', e.id],
+          ['去重键', e.dedupKey],
+          ['设备 ID', e.deviceId],
+          ['设备序列号', e.serialNumber],
+          ['事件序号', e.eventSerialNo],
+          ['来源', text(e.source, SOURCE_TEXT)],
+          ['事件类型', e.eventType],
+          ['主类型', (e.major === null || e.major === undefined) ? '' : text(e.major, MAJOR_TEXT) + '（' + e.major + '）'],
+          ['次类型', (e.minor === null || e.minor === undefined) ? '' : (MINOR_TEXT[e.minor] || '未知') + '（' + e.minor + '）'],
+          ['工号', e.employeeNo],
+          ['姓名', e.personName],
+          ['卡号', e.cardNo],
+          ['门号', e.doorNo],
+          ['认证方式', e.verifyMode ? (VERIFY_TEXT[e.verifyMode] || e.verifyMode) + '（' + e.verifyMode + '）' : ''],
+          ['是否门禁事件', e.isAccessControl ? '是' : '否'],
+          ['事件时间', fmtTime(e.eventTime)],
+          ['接收时间', fmtTime(e.receivedAt)],
+          ['入队时间', fmtTime(e.enqueuedAt)],
+          ['入库时间', fmtTime(e.storedAt)],
+          ['队列后端', text(e.queueProvider, PROVIDER_TEXT)],
+          ['队列消息 ID', e.queueMessageId],
+          ['投递次数', e.deliveryAttempts],
+          ['报警 Topic', e.alarmTopic],
+          ['报警类型 / 数据类型', e.alarmType + ' / ' + e.dataType],
+          ['报文格式', text(e.payloadFormat, FORMAT_TEXT)],
+          ['报文字节', e.payloadBytes],
+          ['报文被截断', e.payloadTruncated ? '是' : '否'],
+          ['抓拍图片', (e.pictures && e.pictures.length) ? e.pictures.join('、') : ''],
+          ['HTTP 上报 URL', e.httpUrl]
+        ];
+
+        let payloadHtml = '<div class="muted">（本条未保存报文原文，或 EventStore:StorePayload=false）</div>';
+        if (e.payload) {
+          let pretty = e.payload;
+          try { pretty = JSON.stringify(JSON.parse(e.payload), null, 2); } catch (err) { /* 非 JSON 原样显示 */ }
+          payloadHtml = '<pre>' + esc(pretty) + '</pre>';
+        }
+
+        $('modalBody').innerHTML =
+          '<div class="kv">' + kv.map(function (item) {
+            return '<div class="k">' + esc(item[0]) + '</div><div>' + esc(item[1] === null || item[1] === undefined || item[1] === '' ? EMPTY : item[1]) + '</div>';
+          }).join('') + '</div>' +
+          '<h2 style="margin:16px 0 8px">报文原文</h2>' + payloadHtml;
+
+        $('modal').classList.remove('hidden');
+      } catch (e) {
+        msg($('queryMsg'), 'err', '读取详情失败：' + e.message);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // 运维操作
+    // ---------------------------------------------------------------------------
+    async function submitManual(event) {
+      event.preventDefault();
+      const el = $('manualMsg');
+      hide(el);
+
+      const payload = {
+        deviceId: $('mDeviceId').value.trim(),
+        serialNo: $('mSerialNo').value.trim(),
+        eventTime: $('mEventTime').value ? $('mEventTime').value + ':00' : null,
+        major: parseInt($('mMajor').value, 10),
+        minor: parseInt($('mMinor').value, 10),
+        employeeNo: $('mEmployeeNo').value.trim(),
+        personName: $('mPersonName').value.trim(),
+        cardNo: $('mCardNo').value.trim(),
+        doorNo: parseInt($('mDoorNo').value || '0', 10),
+        verifyMode: $('mVerifyMode').value
+      };
+
+      if (!payload.deviceId) {
+        msg(el, 'err', '设备 ID 必填。');
+        return;
+      }
+
+      try {
+        const direct = $('mDirect').checked;
+        const result = await api('/api/events/manual' + (direct ? '?direct=true' : ''), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const lines = (result.items || []).map(function (item) {
+          const status = MANUAL_STATUS_TEXT[item.status] || item.status;
+          return '  #' + (item.index + 1) + ' ' + status + (item.dedupKey ? '（去重键 ' + item.dedupKey + '）' : '') +
+            (item.error ? '：' + item.error : '');
+        });
+
+        msg(el, 'ok', '请求 ' + result.requested + ' 条：受理 ' + result.accepted + ' 条，重复 ' + result.duplicates +
+          ' 条，拒绝 ' + result.rejected + ' 条' + (result.directToStore ? '，直接入库 ' + result.stored + ' 行' : '') +
+          (lines.length ? '\n' + lines.join('\n') : ''));
+
+        runQuery(false);
+        loadStatus();
+        loadFacets(false); // 补录可能引入新的取值，刷新下拉选项
+      } catch (e) {
+        msg(el, 'err', '补录失败：' + e.message);
+      }
+    }
+
+    async function runReconcile() {
+      const el = $('reconcileMsg');
+      hide(el);
+
+      const params = new URLSearchParams();
+      params.set('lookbackSeconds', String(parseInt($('rLookback').value || '3600', 10)));
+      const deviceId = $('rDeviceId').value.trim();
+      if (deviceId) params.set('deviceId', deviceId);
+
+      try {
+        const result = await api('/api/events/reconcile?' + params.toString(), { method: 'POST' });
+        const lines = (result.items || []).map(function (item) {
+          return '  ' + item.deviceId + '：补齐 ' + (item.recovered || 0) + ' 条，重复 ' + (item.duplicates || 0) + ' 条' +
+            (item.error ? '，' + item.error : '');
+        });
+
+        msg(el, 'ok', '对账完成：补齐 ' + result.recovered + ' 条，重复 ' + result.duplicates + ' 条（设备 ' +
+          result.devices + ' 台，回看 ' + (result.lookbackSeconds || '增量') + '，耗时 ' + result.elapsedMs + ' ms）' +
+          (lines.length ? '\n' + lines.join('\n') : ''));
+
+        runQuery(false);
+      } catch (e) {
+        msg(el, 'err', '对账失败：' + e.message);
+      }
+    }
+
+    async function runReplay() {
+      const el = $('replayMsg');
+      hide(el);
+
+      try {
+        const days = parseInt($('sDays').value || '2', 10);
+        const result = await api('/api/events/replay-spool?days=' + days, { method: 'POST' });
+        msg(el, 'ok', '重放完成：扫描文件 ' + result.files + ' 个，记录 ' + result.records + ' 条，新入库 ' +
+          result.inserted + ' 行，重复跳过 ' + result.skipped + ' 行，出错 ' + result.errors + ' 条，耗时 ' + result.elapsedMs + ' ms');
+        runQuery(false);
+        loadStatus();
+        loadFacets(false); // 重放可能引入新的取值
+      } catch (e) {
+        msg(el, 'err', '重放失败：' + e.message);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // 初始化
+    // ---------------------------------------------------------------------------
+    function applyQuickRange(kind) {
+      const now = new Date();
+      let from = new Date(now);
+
+      if (kind === 'today') {
+        from = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+      } else if (kind === '1h') {
+        from = new Date(now.getTime() - 60 * 60 * 1000);
+      } else if (kind === '24h') {
+        from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      } else if (kind === '7d') {
+        from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      }
+
+      $('qFrom').value = toLocalInput(from);
+      $('qTo').value = toLocalInput(now);
+    }
+
+    function init() {
+      $('baseUrl').value = (location.protocol === 'file:') ? 'http://localhost:5180' : location.origin;
+      if (location.protocol === 'file:') {
+        msg($('statusMsg'), 'warn', '当前是以文件方式打开页面，浏览器可能因跨域策略拒绝请求。\n' +
+          '建议改为访问 http://<服务地址>/events.html（页面已内置在本服务里）。');
+      }
+
+      $('queryForm').addEventListener('submit', function (event) { event.preventDefault(); runQuery(true); });
+      $('resetBtn').addEventListener('click', function () {
+        ['qDeviceId', 'qEmployeeNo', 'qCardNo', 'qKeyword', 'qFrom', 'qTo', 'qEventTypeCustom'].forEach(function (id) { $(id).value = ''; });
+        ['qEventType', 'qSource', 'qVerifyMode', 'qMajor', 'qMinor'].forEach(function (id) { $(id).value = ''; });
+        onEventTypeChanged();
+        $('qAcsOnly').checked = false;
+        $('qIncludePayload').checked = true;
+        $('qOrder').value = '';
+        $('qLimit').value = '20';
+        runQuery(true);
+      });
+
+      document.querySelectorAll('.quick button').forEach(function (button) {
+        button.addEventListener('click', function () {
+          applyQuickRange(button.getAttribute('data-range'));
+          runQuery(true);
+        });
+      });
+
+      $('prevBtn').addEventListener('click', function () {
+        page.offset = Math.max(0, page.offset - page.limit);
+        runQuery(false);
+      });
+
+      $('nextBtn').addEventListener('click', function () {
+        if (page.offset + page.items.length < page.total) {
+          page.offset += page.limit;
+          runQuery(false);
+        }
+      });
+
+      $('refreshStatusBtn').addEventListener('click', loadStatus);
+      $('refreshFacetsBtn').addEventListener('click', function () { loadFacets(true); });
+      $('qEventType').addEventListener('change', onEventTypeChanged);
+      $('manualForm').addEventListener('submit', submitManual);
+      $('reconcileBtn').addEventListener('click', runReconcile);
+      $('replayBtn').addEventListener('click', runReplay);
+      $('modalClose').addEventListener('click', function () { $('modal').classList.add('hidden'); });
+      $('modal').addEventListener('click', function (event) {
+        if (event.target === $('modal')) $('modal').classList.add('hidden');
+      });
+
+      $('autoRefresh').addEventListener('change', function () {
+        if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+        if ($('autoRefresh').checked) statusTimer = setInterval(loadStatus, 10000);
+      });
+
+      $('mEventTime').value = toLocalInput(new Date());
+
+      loadStatus();
+      loadFacets(false);
+      runQuery(true);
+    }
+
+    init();
+  </script>
+</body>
+
+</html>

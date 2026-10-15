@@ -1,0 +1,64 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>ISUPSDK.AccessControl.WebApi</AssemblyName>
+    <RootNamespace>ISUPSDK.AccessControl.WebApi</RootNamespace>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1570</NoWarn>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 原始控制台项目（ISUPSDK.NETCore）使用到的依赖，保持版本一致。 -->
+    <PackageReference Include="Experimental.System.Messaging" Version="1.1.0" />
+    <PackageReference Include="NCrontab.Signed" Version="3.3.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="SkiaSharp" Version="3.116.1" />
+    <!-- Web API / Swagger -->
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <!-- 事件队列 RabbitMQ 后端（MSMQ 走 mqrt.dll P/Invoke，无需包） -->
+    <PackageReference Include="RabbitMQ.Client" Version="7.2.2" />
+    <!-- 异步下发任务库 / 事件库（EF Core，可切换 SQLite / SQL Server / MySQL） -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.11" />
+    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="appsettings.Development.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <!-- 服务参数（报警/图片/NTP/DAS 地址等）由 ISUPDemo.xml 提供，必须随生成复制到输出目录。 -->
+    <None Update="ISUPDemo.xml">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ISUPSDK.AccessControl.Tests" />
+  </ItemGroup>
+
+  <!--
+    ISUP SDK 原生构件（HCISUPCMS.dll / HCISUPAlarm.dll / HCISUPSS.dll / HCISUPStream.dll
+    及其依赖 libeay32.dll、ssleay32.dll、HCNetUtils.dll 等）不在编译期引用，
+    运行时由 Interop/NativeLibraryResolver 从 ISUP:NativeDirectory 指定的目录加载。
+    部署时请把整个 SDK 目录一并拷贝到目标机。
+  -->
+
+  <!-- 内置静态页面（wwwroot/events.html）：随生成复制到输出目录，
+       保证以 bin 目录为工作目录启动时（run.ps1 或直接运行 exe）也能访问。 -->
+  <ItemGroup>
+    <Content Update="wwwroot\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

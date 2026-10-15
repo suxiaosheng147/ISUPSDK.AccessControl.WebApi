@@ -1,0 +1,48 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<LocalCfg>
+    <Param>
+        <LogPath>C:/EHomeSdkLog/</LogPath>
+        <LogLevel>3</LogLevel>
+        <LogAutoDel>false</LogAutoDel>
+        <KeepAliveSeconds>15</KeepAliveSeconds>
+        <KeepAliveCount>6</KeepAliveCount>
+        <AlarmServerType>2</AlarmServerType>
+        <AlarmServerIP>192.168.1.12</AlarmServerIP>
+        <AlarmServerUdpPort>7332</AlarmServerUdpPort>
+        <AlarmServerTcpPort>7333</AlarmServerTcpPort>
+        <AlarmServerMqttPort>7663</AlarmServerMqttPort>
+        <AlarmServerPortUseCms>1</AlarmServerPortUseCms>
+        <NTPServerIP>ntp.ntsc.ac.cn</NTPServerIP>
+        <NTPServerPort>123</NTPServerPort>
+        <NTPInterval>10</NTPInterval>
+        <PictureServerType>3</PictureServerType>
+        <PictureServerIP>192.168.1.12</PictureServerIP>
+        <PictureServerPort>8081</PictureServerPort>
+        <CmsAccessSecurity>0</CmsAccessSecurity>
+        <AlarmAccessSecurity>0</AlarmAccessSecurity>
+        <StreamAccessSecurity>0</StreamAccessSecurity>
+        <AlarmPictureSeparate>1</AlarmPictureSeparate>
+    </Param>
+    <AddressMap>
+        <!--If there is a mapping relationship, the following values are the post-mapping addresses -->
+        <Enable>1</Enable>
+        <!--If Enable == 1, the following values will be send to device. Otherwise, the values which in Param will be send to Device -->
+        <StreamServerIP>113.105.236.182</StreamServerIP>
+        <StreamServerPort>8000</StreamServerPort>
+        <AudioServerIP>113.105.236.182</AudioServerIP>
+        <AudioServerPort>7500</AudioServerPort>
+        <AlarmServerIP>113.105.236.182</AlarmServerIP>
+        <AlarmServerUdpPort>7332</AlarmServerUdpPort>
+        <AlarmServerTcpPort>7333</AlarmServerTcpPort>
+        <AlarmServerMqttPort>7663</AlarmServerMqttPort>
+        <PictureServerIP>113.105.236.182</PictureServerIP>
+        <PictureServerPort>8081</PictureServerPort>
+    </AddressMap>
+    <DasInfo>
+        <ServerType>0</ServerType>
+        <!--0-LBS&DAS 1-LBS 2-DAS-->
+        <DasInfoPath>C:/EHomeSdkLog/DasInfo.xml</DasInfoPath>
+        <DASIP>113.105.236.182</DASIP>
+        <DASPort>7660</DASPort>
+    </DasInfo>
+</LocalCfg>
