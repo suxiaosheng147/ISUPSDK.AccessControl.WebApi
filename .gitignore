@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/src/ISUPSDK.AccessControl.WebApi/storage/acs-events.db
+/src/ISUPSDK.AccessControl.WebApi/storage/acs-events.db-shm
+/src/ISUPSDK.AccessControl.WebApi/storage/acs-events.db-wal
