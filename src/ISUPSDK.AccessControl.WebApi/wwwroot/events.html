@@ -310,10 +310,18 @@
 
       <h2>手动对账补漏（POST /api/events/reconcile）</h2>
       <div class="row">
+        <label class="field">开始时间<input id="rFrom" type="datetime-local" step="1"></label>
+        <label class="field">结束时间<input id="rTo" type="datetime-local" step="1"></label>
         <label class="field">回看秒数<input id="rLookback" type="number" min="60" value="3600"></label>
         <label class="field">设备 ID<input id="rDeviceId" placeholder="可留空=全部在线设备"></label>
+        <label class="field">每轮最大页数<input id="rMaxPages" type="number" min="1" placeholder="留空=用配置"></label>
+        <label class="field">仅诊断<input id="rDryRun" type="checkbox"></label>
         <button id="reconcileBtn">立即对账</button>
-        <span class="muted">从设备本地事件表拉取平台漏收的历史事件（需设备在线且为 OTAP 协议）。</span>
+      </div>
+      <div class="muted" style="margin-top:6px">
+        填了开始/结束时间就按该区间补历史（只填开始=补到"现在"；只填结束=按"回看秒数"从结束时间往前推）；
+        两者都不填则按"回看秒数"从当前时间往前推。时间不带时区，按服务端 <code>ISUP:Time:TimeZone</code>（默认北京时间）解释。
+        补历史区间不会推进后台定时对账的进度。
       </div>
       <div id="reconcileMsg" class="msg hidden"></div>
 
@@ -373,6 +381,7 @@
       EHome: 'AMS · EHome 报文',
       Exception: 'AMS · 异常回调',
       Reconcile: '历史对账补漏',
+      IsapiDigest: 'ISAPI 直连（Digest）',
       Manual: '手工补录',
       Msmq: 'MSMQ 消息',
       RabbitMq: 'RabbitMQ 消息'
@@ -861,19 +870,42 @@
       hide(el);
 
       const params = new URLSearchParams();
-      params.set('lookbackSeconds', String(parseInt($('rLookback').value || '3600', 10)));
+      const from = $('rFrom').value.trim();
+      const to = $('rTo').value.trim();
+
+      if (from || to) {
+        // 按区间补历史：datetime-local 的值不带时区，服务端按 ISUP:Time:TimeZone 解释
+        if (from) params.set('from', from);
+        if (to) params.set('to', to);
+      } else {
+        params.set('lookbackSeconds', String(parseInt($('rLookback').value || '3600', 10)));
+      }
+
       const deviceId = $('rDeviceId').value.trim();
       if (deviceId) params.set('deviceId', deviceId);
+      if ($('rDryRun').checked) params.set('dryRun', 'true');
+      const maxPages = $('rMaxPages').value.trim();
+      if (maxPages) params.set('maxPages', maxPages);
 
       try {
         const result = await api('/api/events/reconcile?' + params.toString(), { method: 'POST' });
         const lines = (result.items || []).map(function (item) {
-          return '  ' + item.deviceId + '：补齐 ' + (item.recovered || 0) + ' 条，重复 ' + (item.duplicates || 0) + ' 条' +
-            (item.error ? '，' + item.error : '');
+          return '  ' + item.deviceId + (item.channel ? '（' + item.channel + '）' : '') +
+            '：设备返回 ' + (item.queried || 0) + ' 条，补齐 ' + (item.recovered || 0) +
+            ' 条，重复 ' + (item.duplicates || 0) + ' 条' +
+            (item.truncated ? '（已达单轮页数上限' + (item.nextFrom ? '，可从 ' + item.nextFrom + ' 继续补' : '') + '）' : '') +
+            (item.detail ? '\n      ' + item.detail : '') +
+            (item.error ? '\n      ' + item.error : '');
         });
 
-        msg(el, 'ok', '对账完成：补齐 ' + result.recovered + ' 条，重复 ' + result.duplicates + ' 条（设备 ' +
-          result.devices + ' 台，回看 ' + (result.lookbackSeconds || '增量') + '，耗时 ' + result.elapsedMs + ' ms）' +
+        const windowText = (result.from || result.to)
+          ? ((result.from || '(最早)') + ' → ' + (result.to || '现在'))
+          : ('回看 ' + (result.lookbackSeconds || '增量'));
+
+        msg(el, 'ok', (result.dryRun ? '对账诊断（未写库）' : '对账完成') +
+          '：设备返回 ' + (result.queried || 0) + ' 条，补齐 ' + result.recovered + ' 条，重复 ' + result.duplicates +
+          ' 条（设备 ' + result.devices + ' 台，' + windowText + '，耗时 ' + result.elapsedMs + ' ms）' +
+          (result.truncated ? '\n注意：部分设备仍有更早的事件未取完（本轮页数上限 ' + (result.maxPages || '配置值') + '），请调大"每轮最大页数"或把区间拆小后重试。' : '') +
           (lines.length ? '\n' + lines.join('\n') : ''));
 
         runQuery(false);

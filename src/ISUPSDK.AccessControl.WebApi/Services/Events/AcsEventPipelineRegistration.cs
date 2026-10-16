@@ -37,6 +37,10 @@ public static class AcsEventPipelineRegistration
         services.AddSingleton<AcsEventSpoolReplayer>();
         services.AddSingleton<AcsEventPublisher>();
 
+        // 报警转发：消费者取出队列消息后按 MinorType 判定，并投递到下游队列
+        // （Settings:MessageQueueAddress）——生产端（SDK 报警回调）不做判定、不直接发送。
+        services.AddSingleton<AcsAlarmForwardService>();
+
         // 手工补录（POST /api/events/manual）：走 spool + 队列，或直接入库。
         services.AddSingleton<AcsManualEventService>();
 

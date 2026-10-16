@@ -405,6 +405,13 @@ public sealed class IsupCmsService
         var pOut = Marshal.AllocHGlobal((int)bufferSize);
         var pCfg = Marshal.AllocHGlobal(Marshal.SizeOf<HCISUPCMS.NET_EHOME_PTXML_PARAM>());
 
+        // 输出缓冲必须先清零：SDK 不保证在响应末尾写 NUL，缓冲区里的上一次堆内存残留
+        // 会被一起读出来（表现为"合法 JSON 后面跟 '1' / 0xEF 等垃圾"，导致解析失败）。
+        unsafe
+        {
+            new Span<byte>((void*)pOut, (int)bufferSize).Clear();
+        }
+
         try
         {
             Marshal.Copy(urlBytes, 0, pUrl, urlBytes.Length);
@@ -446,7 +453,12 @@ public sealed class IsupCmsService
 
             var updated = Marshal.PtrToStructure<HCISUPCMS.NET_EHOME_PTXML_PARAM>(pCfg);
             var length = updated.dwReturnedXMLLen > 0 ? (int)updated.dwReturnedXMLLen : (int)updated.dwOutSize;
-            var text = length > 0 ? Marshal.PtrToStringUTF8(pOut) : string.Empty;
+
+            // 按 SDK 返回的长度读取，并按第一个 NUL 截断：
+            // 部分固件会把 dwReturnedXMLLen 填成缓冲区大小，读满会把零填充/残留带进文本。
+            var text = length > 0
+                ? IsapiResponseNormalizer.TruncateAtNul(Marshal.PtrToStringUTF8(pOut, length) ?? string.Empty)
+                : string.Empty;
 
             return (true, text, 0);
         }

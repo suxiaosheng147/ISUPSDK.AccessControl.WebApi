@@ -30,6 +30,7 @@ public sealed class EventsController : ControllerBase
     private readonly AcsEventSpoolReplayer _replayer;
     private readonly AcsManualEventService _manual;
     private readonly AcsEventReconcileService _reconcile;
+    private readonly AcsAlarmForwardService _forwarder;
     private readonly IEventQueue _queue;
     private readonly ILogger<EventsController> _logger;
 
@@ -41,6 +42,7 @@ public sealed class EventsController : ControllerBase
         AcsEventSpoolReplayer replayer,
         AcsManualEventService manual,
         AcsEventReconcileService reconcile,
+        AcsAlarmForwardService forwarder,
         IEventQueue queue,
         ILogger<EventsController> logger)
     {
@@ -51,8 +53,35 @@ public sealed class EventsController : ControllerBase
         _replayer = replayer;
         _manual = manual;
         _reconcile = reconcile;
+        _forwarder = forwarder;
         _queue = queue;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// 读取事件抓拍图（Digest 直连下载后落盘的图片）。
+    /// </summary>
+    /// <remarks>
+    /// 转发报文里的 <c>ExtEventPictureURL</c> 就指向本接口，形如
+    /// <c>GET /api/events/pictures/FZ7955795_20261016091756_1_449789.jpeg</c>。
+    /// 只接受纯文件名：含路径分隔符或上级目录的请求返回 400；文件不存在返回 404。
+    /// </remarks>
+    [HttpGet("pictures/{fileName}")]
+    [Produces("image/jpeg")]
+    public IActionResult Picture(string fileName)
+    {
+        var full = _forwarder.ResolvePictureFile(fileName);
+        if (full is null)
+        {
+            throw new IsupApiException("文件名非法（只允许纯文件名，不含路径分隔符）。");
+        }
+
+        if (!System.IO.File.Exists(full))
+        {
+            throw new IsupApiException($"抓拍图不存在：{fileName}", StatusCodes.Status404NotFound);
+        }
+
+        return PhysicalFile(full, "image/jpeg", enableRangeProcessing: true);
     }
 
     /// <summary>事件管道状态：队列后端、生产/消费计数、入库统计、落盘重放情况。</summary>
@@ -91,6 +120,11 @@ public sealed class EventsController : ControllerBase
                 retried = _consumer.Retried,
                 deadLettered = _consumer.DeadLettered,
                 failedBatches = _consumer.Failed,
+                // 消费者侧的报警转发统计（判定 + 投递到 Settings:MessageQueueAddress）。
+                forwarded = _consumer.Forwarded,
+                forwardSkipped = _consumer.ForwardSkipped,
+                forwardDuplicates = _consumer.ForwardDuplicates,
+                forwardFailed = _consumer.ForwardFailed,
                 lastConsumedAt = _consumer.LastConsumedAt,
                 lastError = _consumer.LastError,
                 lastErrorAt = _consumer.LastErrorAt,
@@ -195,25 +229,65 @@ public sealed class EventsController : ControllerBase
     /// 手动触发一次设备历史事件对账（补齐"平台漏收、设备本地仍存着"的门禁事件）。
     /// </summary>
     /// <remarks>
-    /// 与后台定时对账（<c>EventReconcile</c>，默认每 300 秒）的区别：可显式指定回看窗口与设备，立即执行。
+    /// 与后台定时对账（<c>EventReconcile</c>，默认每 300 秒）的区别：可显式指定查询区间（或回看窗口）与设备，立即执行。
     /// 补齐的事件走与实时上报相同的链路（去重 → 落盘 outbox → 消息队列 → 入库），因此不会产生重复行。
     ///
-    /// 示例：<c>POST /api/events/reconcile?lookbackSeconds=3600&amp;deviceId=FZ7955795</c>
-    /// （<c>deviceId</c> 可重复传多次；都不传时用配置的增量窗口与设备白名单）。
+    /// 三种用法（优先级从高到低）：
+    /// 1. **指定区间**（补历史某段时间）：
+    ///    <c>POST /api/events/reconcile?from=2026-10-15T00:00:00&amp;to=2026-10-16T00:00:00</c>
+    ///    —— 不带时区偏移的时间按 <c>ISUP:Time:TimeZone</c>（默认北京时间）解释；只给 <c>from</c> 时结束时间取"现在"，
+    ///    只给 <c>to</c> 时开始时间按回看窗口倒推；补历史区间**不推进**定时对账的增量基准；
+    /// 2. **指定回看窗口**（从"现在"回看 N 秒）：<c>?lookbackSeconds=3600</c>；
+    /// 3. **都不给**：用配置的增量窗口（上次对账时间 − 重叠秒数 → 现在）与设备白名单。
+    ///
+    /// <c>deviceId</c> 可重复传多次；不传时对账所有在线 OTAP 设备（或配置的设备白名单）。
+    /// 单台设备每轮最多取 <c>EventReconcile:MaxPagesPerRun</c> 页，响应里的 <c>truncated=true</c>
+    /// 表示还有更早的事件没取完（把区间拆小或调大该配置后重试）。
     /// </remarks>
     [HttpPost("reconcile")]
     public async Task<IActionResult> Reconcile(
+        [FromQuery] string? from = null,
+        [FromQuery] string? to = null,
         [FromQuery] int? lookbackSeconds = null,
         [FromQuery] string[]? deviceId = null,
+        [FromQuery] bool dryRun = false,
+        [FromQuery] int? maxPages = null,
         CancellationToken ct = default)
     {
+        if (!_reconcile.TryParseWindowTime(from, out var fromTime, out var fromError))
+        {
+            throw new IsupApiException(fromError!);
+        }
+
+        if (!_reconcile.TryParseWindowTime(to, out var toTime, out var toError))
+        {
+            throw new IsupApiException(toError!);
+        }
+
+        if (fromTime is { } start && toTime is { } end && start >= end)
+        {
+            throw new IsupApiException("开始时间必须早于结束时间（from < to）。");
+        }
+
         var result = await _reconcile
-            .ReconcileNowAsync(lookbackSeconds, deviceId, ct)
+            .ReconcileNowAsync(lookbackSeconds, deviceId, fromTime, toTime, dryRun, maxPages, ct)
             .ConfigureAwait(false);
+
+        var window = fromTime is null && toTime is null
+            ? (result.LookbackSeconds is { } seconds ? $"回看 {seconds}s" : "增量")
+            : $"{fromTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "(最早)"} → {toTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "现在"}";
+
+        // 一条都没补齐时给出下一步：看逐设备的 error/detail（设备原始响应也在里面）。
+        var hint = result.Recovered == 0 && result.Queried == 0
+            ? "；设备未返回事件，请看 items[].error / items[].detail（含 subStatusCode 与设备原始响应）"
+            : string.Empty;
 
         return Ok(ApiResponse<AcsReconcileRunResult>.Ok(
             result,
-            $"对账完成：补齐 {result.Recovered} 条，重复 {result.Duplicates} 条（设备 {result.Devices} 台）"));
+            $"{(result.DryRun ? "对账诊断（未写库）" : "对账完成")}：设备返回 {result.Queried} 条，补齐 {result.Recovered} 条，重复 {result.Duplicates} 条"
+            + $"（设备 {result.Devices} 台，区间 {window}）"
+            + (result.Truncated ? $"；仍有更早事件未取完（本轮页数上限 {result.MaxPages}）：调大 maxPages，或用 items[].nextFrom 作为新的 from 继续补" : string.Empty)
+            + hint));
     }
 
     /// <summary>

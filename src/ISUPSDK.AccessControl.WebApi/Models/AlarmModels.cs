@@ -68,8 +68,9 @@ public sealed class IsupAlarmEvent
     public uint? ErrorCode { get; set; }
 
     /// <summary>
-    /// 入库时是否跳过去重：设备主动上报的 ISUP 报警不去重；手工补录 force=true 时也不去重。
-    /// 对账补漏保持默认（false）——查重后重复的不会入库。
+    /// 入库时是否跳过去重：手工补录 <c>force=true</c> 时不去重（允许写入重复行）；
+    /// 设备报警回调、HTTP 推送、历史对账补漏都按 <c>deviceId:serialNo:事件时间</c> 幂等去重
+    /// （见 <c>AcsEventSpool.BuildDedupKey</c>）。
     /// </summary>
     public bool SkipDedup { get; set; }
 

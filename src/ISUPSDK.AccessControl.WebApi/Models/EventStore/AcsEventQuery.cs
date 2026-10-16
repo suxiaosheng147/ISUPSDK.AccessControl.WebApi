@@ -52,8 +52,19 @@ public sealed class AcsEventQuery
     public bool OrderAscending { get; set; }
 }
 
-/// <summary>一次批量写入的结果。</summary>
-public sealed record AcsEventWriteResult(int Inserted, int Skipped, bool Success, string? Error);
+/// <summary>
+/// 一次批量写入的结果。
+/// <para>
+/// <see cref="InsertedKeys"/> 给出本次<b>真正新增入库</b>的 <c>DedupKey</c>（去重键）集合，
+/// 消费端据此判断"这条消息是否需要转发到下游队列"——因重复被跳过的消息不再二次转发。
+/// </para>
+/// </summary>
+public sealed record AcsEventWriteResult(
+    int Inserted,
+    int Skipped,
+    bool Success,
+    string? Error,
+    IReadOnlySet<string>? InsertedKeys = null);
 
 /// <summary>一次"落盘文件重放"的结果。</summary>
 public sealed record AcsEventReplayResult

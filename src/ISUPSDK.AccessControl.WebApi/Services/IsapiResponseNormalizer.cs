@@ -23,17 +23,22 @@ public static class IsapiResponseNormalizer
 
         var trimmed = responseText.TrimStart();
 
-        // 已经是 JSON
+        // 以 JSON 开头：截到第一个完整 JSON 值 —— SDK 透传的输出缓冲常在正文后跟垃圾
+        // （0x03 结束符，或缓冲区残留的 '1' / '5' / 0xEF 等），JsonDocument / 反序列化会直接报错。
         if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
         {
-            return responseText;
+            return TruncateToFirstJsonValue(trimmed);
         }
+
+        // 非 JSON：清掉尾部控制字符后再做 multipart / XML / 纯文本判断。
+        var cleaned = TrimTrailingControlChars(responseText);
+        trimmed = cleaned.TrimStart();
 
         // multipart 中的 JSON 分段
         if (trimmed.StartsWith("--", StringComparison.Ordinal) ||
             trimmed.Contains("Content-Disposition", StringComparison.OrdinalIgnoreCase))
         {
-            var extracted = IsapiMultipartResponse.ExtractJson(responseText);
+            var extracted = IsapiMultipartResponse.ExtractJson(cleaned);
             if (!string.IsNullOrWhiteSpace(extracted))
             {
                 return extracted;
@@ -43,11 +48,111 @@ public static class IsapiResponseNormalizer
         // XML 响应（成功或失败的 ResponseStatus）
         if (trimmed.StartsWith('<'))
         {
-            return XmlToJson(responseText);
+            return XmlToJson(cleaned);
         }
 
         // 纯文本响应（例如 "OK"）包成对象，避免反序列化报错
         return "{\"rawText\":" + JsonSerializer.Serialize(trimmed) + "}";
+    }
+
+    /// <summary>
+    /// 去掉响应文本尾部的控制字符（字符码 &lt; 0x20，如 <c>0x03</c> = ETX、<c>0x00</c>）：
+    /// 设备侧常在报文结尾跟一个结束符，会让 JSON 解析报
+    /// "Additional text encountered after finished reading JSON content"。
+    /// </summary>
+    public static string TrimTrailingControlChars(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        var end = text.Length;
+        while (end > 0 && text[end - 1] < ' ')
+        {
+            end--;
+        }
+
+        return end == text.Length ? text : text[..end];
+    }
+
+    /// <summary>
+    /// 按第一个 NUL 字符截断（读取原生输出缓冲时用）：SDK 可能按"缓冲区大小"返回长度，
+    /// 把零填充一起带出来，读成字符串后尾部就是一串 <c>\0</c>。
+    /// </summary>
+    public static string TruncateAtNul(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        var nul = text.IndexOf('\0');
+        return nul < 0 ? text : text[..nul];
+    }
+
+    /// <summary>
+    /// 截出响应文本里的<b>第一个完整 JSON 值</b>（只对以 <c>{</c> / <c>[</c> 开头的文本生效，否则原样返回）。
+    /// <para>
+    /// SDK 透传的输出缓冲里常残留多余数据，表现为"合法 JSON 后面还跟着垃圾" ——
+    /// 日志里的 <c>'1' / '5' / 0xEF is invalid after a single JSON value</c> 就是它。
+    /// 只清尾部控制字符救不了（垃圾可能是 <c>1</c>、<c>5</c>、0xEF 这类可见字符），
+    /// 所以这里按 JSON 结构读到第一个值结束为止，把后面的内容丢掉。
+    /// </para>
+    /// </summary>
+    public static string TruncateToFirstJsonValue(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = text.TrimStart();
+        if (!trimmed.StartsWith('{') && !trimmed.StartsWith('['))
+        {
+            return text;
+        }
+
+        // 只保留到第一个完整 JSON 值：读完顶层 EndObject / EndArray（或顶层标量）即停。
+        var bytes = Encoding.UTF8.GetBytes(trimmed);
+        var reader = new Utf8JsonReader(bytes);
+        var consumed = -1;
+
+        try
+        {
+            while (reader.Read())
+            {
+                if (reader.CurrentDepth != 0)
+                {
+                    continue;
+                }
+
+                switch (reader.TokenType)
+                {
+                    case JsonTokenType.EndObject:
+                    case JsonTokenType.EndArray:
+                    case JsonTokenType.String:
+                    case JsonTokenType.Number:
+                    case JsonTokenType.True:
+                    case JsonTokenType.False:
+                    case JsonTokenType.Null:
+                        consumed = (int)reader.BytesConsumed;
+                        break;
+                }
+
+                if (consumed >= 0)
+                {
+                    break;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // 文本本身不是合法 JSON（例如被截断）：原样返回，交给调用方按原样报错。
+            return text;
+        }
+
+        return consumed <= 0 ? text : Encoding.UTF8.GetString(bytes, 0, consumed);
     }
 
     /// <summary>

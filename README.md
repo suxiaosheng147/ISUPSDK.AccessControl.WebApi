@@ -37,7 +37,7 @@ ISUPSDK.AccessControl/
     │   ├── IsupAmsService.cs          #   报警事件缓冲（订阅 SDK 报警回调）
     │   ├── IsupSsService.cs           #   图片存储（设备上传落盘的管理）
     │   ├── Tasks/                     #   异步下发任务队列
-    │   └── Events/                    #   门禁事件入库管道
+    │   └── Events/                    #   门禁事件入库管道 + 报警转发（判定与发送在消费者侧）
     ├── data/                          # EF Core 实体与上下文（任务库 / 事件库）
     ├── SdkService/                    # ↓ 以下为原控制台项目源码副本
     ├── Structure/
@@ -162,7 +162,7 @@ ISAPI 透传失败 `502`（`code` 为 SDK 错误码）；事件库未就绪 `503
 链路与三个队列后端由 `ISUP:EventQueue` / `ISUP:EventStore` / `ISUP:EventReconcile` 配置：
 
 ```
-SDK 报警回调 ──► IsupAmsService（内存缓冲）
+SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文，不做判定）
                       ▲
    设备 HTTP 上报 / 历史对账 ──► AcsEventSpool（落盘 + 去重）
                       │
@@ -171,9 +171,38 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲）
         IEventQueue（None / Msmq / RabbitMq）
                       │
         AcsEventQueueConsumerService（批量 + ack / 重投 / 死信）
+                      │            │
+                      │            └─ 报警转发（AcsAlarmForwardService）：按 MinorType 判定
+                      │               → 下载图片 + 组 Events JSON
+                      │               → Settings:MessageQueueAddress（默认 .\Private$\haikangevent）
                       │
         AcsEventStore（SQLite / MySQL / SQL Server，DedupHash 唯一索引幂等）
 ```
+
+**报警转发：判定与发送在消费者侧**。生产端（SDK 报警回调）只把报文原样投进队列，
+不做业务判定、也不直接对外发送；消费者在事件落库成功后判定并转发到下游队列
+（`Settings:MessageQueueAddress`，由 `Settings:IsMessageQueue` 总开关控制）：
+
+| 载荷来源 | 转发规则 |
+|---|---|
+| PPVSPMessage XML（SDK 报警回调） | `0x4b` / `0x3c`（人脸）必须带有效图片（`PicDataUrl` 非空且不是 `Failed-to-upload-picture`）才转发；`0x5` / `0x1`（刷卡）无条件转发；其它 MinorType 跳过 |
+| ISAPI JSON（历史对账补漏 / HTTP 推送） | 报文没有图片信息，采用**无图降级**：白名单内的 `minor` 一律转发（`1` / `5` / `75` / `60`），转发报文的图片字段留空，人脸类仍按人脸事件码 196893 上报（不降级成刷卡） |
+
+转发内容为 `Events` JSON（`eventType`、图片 URL 与本地图片路径，链路与原控制台一致）。
+只有"本次真正新增入库"或"重投"的消息才转发：同一事件被重复投递（设备重发、对账补录同一条）
+时不再二次发往下游（计入 `consumer.forwardDuplicates`），因此"回调丢失、由对账补进库"的刷卡/人脸事件
+会补发给下游，而"回调已发过、对账又补录"的事件不会重复发。
+转发失败按与落库失败相同的策略重投（`EventQueue:Consumer:MaxAttempts` / `RetryDelaySeconds`），
+超限进死信；入库按 `DedupHash` 幂等，因此重投不会重复落行。
+`GET /api/events/status` 的 `consumer.forwarded` / `forwardSkipped` / `forwardDuplicates` / `forwardFailed` 给出转发统计。
+
+**跨来源去重（同一设备事件只入库一行）**：去重键统一为 `deviceId:serialNo:事件时间`
+（`AcsEventSpool.ExtractSerialNo` / `ExtractEventTimeKey` 同时解析 JSON 与 PPVSPMessage XML 里的
+`serialNo` 与事件时间；时间按报文自带的"墙上时间"归一化，不做时区换算，因此不受部署机时区影响）。
+报警回调 / HTTP 推送 / 历史对账三条通道共用这一个键，入库按 `DedupHash` 幂等：
+同一条事件被"回调 + 对账"各收到一次、或设备重发时，都只落一行；设备重启后 `serialNo` 从头计数
+也不会把新事件误判成旧事件的重复。报文里取不到 `serialNo` 时才退化为报文哈希；
+手工补录 `force=true` 仍可写入重复行。
 
 | Provider | 说明 |
 |---|---|
@@ -183,7 +212,52 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲）
 
 - 队列不可用时：历史查询照常，`GET /api/events/status` 的 `queue.ready=false` 与 `lastError` 给出原因；
   应急可用 `POST /api/events/manual?directToStore=true` 绕过队列直接入库。
-- 定时对账（默认 5 分钟）从设备拉取历史事件补齐回调丢失的缺口；`POST /api/events/reconcile` 可手动触发。
+- **设备 ISAPI 直连（Digest）——对账的优先通道**：`ISUP:IsapiDigest` 里配置设备 IP / 编号 / 账号 / 密码（可配多台），
+  不依赖 SDK 设备注册即可 `POST /ISAPI/AccessControl/AcsEvent?format=json` 拉取事件。
+  对账目标 = **在线 SDK 设备 ∪ 已配置的直连设备**，通道按配置决定：
+  - **配置里有该设备 → 走 Digest 直连**（跳过 SDK 对账）；
+  - 配置里没有但设备在线 → 走 SDK 透传对账；
+  - 直连失败时是否回退 SDK 由 `FallbackToSdk` 控制（默认 `true` = 回退兜底，`false` = 该设备只走直连）。
+
+  这类报文带 `pictureURL`（人脸事件抓拍图，需 Digest 认证才能取）。落盘开关与目录由本节点控制：
+  `DownloadPictures`（是否下载）与 `PictureDirectory`（目录，留空沿用 `Settings:Photo`）。
+  转发报文里的图片字段用**平台自己的地址**（不用设备地址，下游无需访问设备）：
+  - `ExtEventPictureURL` = `{PictureUrlPrefix}/{文件名}`，默认前缀按 `Settings:ServerAddress` + Kestrel 端口推导为
+    `http://{ServerAddress}:{port}/api/events/pictures`，可用 `PictureUrlPrefix` 覆盖（反代/域名场景）；
+  - `ExtEventPicture` = 落盘文件的本地绝对路径；
+  - 平台侧按 `GET /api/events/pictures/{文件名}` 提供图片（只接受纯文件名，防目录穿越）；
+  - 下载失败时两个字段都留空（不回落成设备地址）。
+  逐设备用的通道见响应的 `items[].channel`（`IsapiDigest` / `Sdk` / `None`）。
+
+- **Digest 高频轮询（抓拍图时效）**：`PollIntervalSeconds`（默认 60，`&lt;=0` 关闭）让服务按短间隔直连每台已配置设备拉增量事件
+  （首轮回看 `PollLookbackSeconds`，每轮与上次时间重叠 `PollOverlapSeconds`，单轮最多 `PollMaxPages` 页）。
+  原因：**人脸抓拍图只存在设备本地且会被循环覆盖**，越早拉越能拿到；定时对账（默认 5 分钟）粒度太粗。
+  轮询只处理已配置 Digest 的设备，与对账 / 回调共用去重键（`deviceId:serialNo:事件时间`），
+  不会重复入库或重发下游；关闭时行为与之前一致（只在对账环节用直连）。
+
+- 定时对账（默认 5 分钟）从设备拉取历史事件补齐回调丢失的缺口，增量窗口为
+  "上次对账时间 − `EventReconcile:OverlapSeconds` → 现在"；`POST /api/events/reconcile` 可手动触发，并支持**按区间补历史**：
+  - 指定区间：`?from=2026-10-15T00:00:00&to=2026-10-16T00:00:00`
+    （不带时区偏移按 `ISUP:Time:TimeZone` 解释；只给 `from` 时补到"现在"，只给 `to` 时按回看窗口倒推）；
+  - 指定回看：`?lookbackSeconds=3600`（从"现在"回看 N 秒）；
+  - 都不给：用配置的增量窗口与设备白名单。
+  补历史区间**不推进**定时对账的进度。内页 `events.html` 的"手动对账补漏"已提供开始/结束时间、
+  每轮最大页数与"仅诊断"开关。
+- **分页取完整个区间**：按设备返回的 `responseStatusStrg=MORE` 逐页取（`EventReconcile:PageSize` 是请求页大小，
+  但设备侧常有自己的单页上限，例如 30 条 —— 所以**只信任 `MORE`**，不能拿"本页条数 < 请求页大小"当结束条件）。
+  页数上限：补历史（显式 `from`/`to`）默认 **500 页**（一年区间可能上万条），定时/增量模式用
+  `EventReconcile:MaxPagesPerRun`（默认 20 页 ≈ 600 条）；两者都可用 `?maxPages=N` 覆盖。
+  响应里的 `truncated=true` 表示到页数上限时设备还有剩余（同时给出 `maxPages`）：
+  调大 `maxPages`，或用该设备的 `items[].nextFrom` 作为新的 `from` 继续补
+  （`nextFrom` 是本轮最后一条事件的时间，设备按时间升序返回）。
+- **补齐 0 条怎么排查**：加 `dryRun=true` 只查询不写库（`POST /api/events/reconcile?dryRun=true&from=…&to=…`），
+  - `queried`：设备实际返回的事件条数（0 表示设备侧就没有/没查到）；
+  - `items[].error`：查询失败原因，含 `subStatusCode` 与设备原始响应摘要（截断 1000 字符）；
+  - `items[].detail`：查询成功但设备未返回事件时的说明（`responseStatusStrg` / `numOfMatches` / 页码 / 页大小）。
+  也可以用 `POST /api/devices/{deviceId}/isapi` 手工透传 `POST /ISAPI/AccessControl/AcsEvent?format=json` 看设备原始响应。
+  服务端对设备响应做了多层清理：原生输出缓冲先清零、按 SDK 返回长度并在首个 NUL 处截断、
+  再截到第一个完整 JSON 值（设备常在正文后跟 `0x03` 结束符或零填充/残留字节）；
+  日志里出现"响应无法解析为 JSON"时，看该告警附带的响应片段。
 - 保留策略：`ISUP:EventStore:RetentionDays > 0` 时按 `RetentionSweepHours` 周期清理过期事件。
 ### 5.1 ISAPI 透传底座
 

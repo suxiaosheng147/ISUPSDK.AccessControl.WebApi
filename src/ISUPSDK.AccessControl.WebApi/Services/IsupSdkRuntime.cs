@@ -1,5 +1,4 @@
 ﻿using ISUPSDK.AccessControl.WebApi.Services.Logging;
-using Experimental.System.Messaging;
 using HKEDUBasicDataSync.Methods;
 using ISUPSDK.AccessControl.WebApi.Customize;
 using ISUPSDK.AccessControl.WebApi.Distribute;
@@ -14,14 +13,11 @@ using ISUPSDK.AccessControl.WebApi.Options;
 using ISUPSDK.AccessControl.WebApi.Structure;
 using Microsoft.Extensions.Configuration;
 using NCrontab;
-using SkiaSharp;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Xml;
-using System.Xml.Serialization;
 namespace ISUPSDK.AccessControl.WebApi.Services
 {
     public sealed class IsupSdkRuntime
@@ -557,6 +553,14 @@ private ConcurrentDictionary<string, DeviceSyncState> AllTask = new();
         //}
 
 
+        /// <summary>
+        /// 报警回调（<c>NET_EALARM_StartListen</c> 上报的门禁事件）。
+        /// <para>
+        /// 只把报文<b>原样</b>广播给事件管道（<see cref="AlarmReceived"/> → 内存缓冲 → 落盘 → 事件队列），
+        /// 这里<b>不做业务判定、也不直接对外发送</b>：MinorType 白名单判定、图片下载与下游转发
+        /// 统一由消费者侧完成（<c>AcsAlarmForwardService</c>）。
+        /// </para>
+        /// </summary>
         private bool AlarmMsgCallBack(int iHandle, IntPtr pAlarmMsg, IntPtr pUser)
         {
             try
@@ -585,21 +589,7 @@ private ConcurrentDictionary<string, DeviceSyncState> AllTask = new();
                 });
                 IsupLog.Info(xmlData);
 
-                using var sr = new StringReader(xmlData);
-                var serializer = new XmlSerializer(typeof(PPVSPMessage));
-                var message = (PPVSPMessage)serializer.Deserialize(sr)!;
-
-                // 空值检查
-                if (message?.Params == null)
-                    return false;
-
-                // 根据事件类型路由处理逻辑
-                return message.Params.MinorType switch
-                {
-                    "0x4b" or "0x3c" => AddReadCard(null,message),
-                    "0x5" or "0x1" => AddReadCard(message),
-                    _ => true
-                };
+                return true;
             }
             catch (Exception ex)
             {
@@ -1228,199 +1218,11 @@ private ConcurrentDictionary<string, DeviceSyncState> AllTask = new();
         #endregion
 
 
-        #region
+        #region 报警转发（已迁移到消费者侧）
 
-
-        private readonly HashSet<string> ValidMinorTypes = ["0x4b", "0x3c", "0x1"];
-        /// <summary>
-        /// 添加刷卡人脸操作
-        /// </summary>
-        /// <param name="machine"></param>
-        /// <param name="message"></param>
-        /// <returns></returns>
-        private bool AddReadCard(im_machine? machine, PPVSPMessage message)
-        {
-            if (!ValidMinorTypes.Contains(message.Params.MinorType)|| string.IsNullOrEmpty(message.Params.PicDataUrl) || message.Params.PicDataUrl == "Failed-to-upload-picture")
-                return false;
-            try
-            {
-                SendSetMessage(message);
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LogException("AddReadCard.txt", ex);
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 添加刷卡人脸操作
-        /// </summary>
-        /// <param name="machine"></param>
-        /// <param name="message"></param>
-        /// <returns></returns>
-        private bool AddReadCard(PPVSPMessage message)
-        {
-            try
-            {
-
-                SendSetMessage(message);
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LogException("AddReadCard.txt", ex);
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <param name="picUrl"></param>
-        /// <param name="fileName"></param>
-        /// <returns></returns>
-        private string DownloadPic(bool IsDownloadPic, string picUrl, string fileName,bool Is=false)
-        {
-            if (!IsDownloadPic)
-            {
-                return string.Empty;
-            }
-            if (string.IsNullOrWhiteSpace(picUrl))
-            {
-                return string.Empty;
-            }
-            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(picUrl);
-            req.Timeout = 5000; // 设置超时值5秒
-            req.Method = "GET";
-            req.ServicePoint.Expect100Continue = false; // 加了这一行代码就OK了
-            string picSave = settings.Photo+(Is==true?"1":"" )+ "\\" + fileName;
-
-            try
-            {
-                // 获取 HTTP 响应
-                using var response = (HttpWebResponse)req.GetResponse();
-                // 获取响应流
-                using var stream = response.GetResponseStream();
-                // 使用 SkiaSharp 从流中加载图片
-                using var bitmap = SKBitmap.Decode(stream);
-                if (bitmap != null)
-                {
-                    // 使用 SkiaSharp 将图像编码为 JPEG 格式
-                    using var image = SKImage.FromBitmap(bitmap);
-                    using var data = image.Encode(SKEncodedImageFormat.Jpeg, 100); // 保存为 JPG 格式，质量为 100
-                    using var fileStream = File.OpenWrite(picSave);
-                    data.SaveTo(fileStream); // 保存为 JPG 格式
-                }
-                return picSave;
-            }
-            catch (Exception ex)
-            {
-                IsupLog.Info("Error: " + ex.Message);
-                return picSave;
-            }
-            
-        }
-
-        /// <summary>
-        /// 发送设置（门禁）信息
-        /// </summary>
-        /// <param name="message"></param>
-        private void SendSetMessage(PPVSPMessage message)
-        {
-            bool lb=false;
-            var shuaTime = Convert.ToDateTime(message.Params.Time);
-            var userid = 0;
-            var UserType = 0;
-            var CardNo = message.Params.cardNo;
-            var Temperature = message.Params.currTemperature;
-            var fileName = string.Empty;
-            // 根据员工编号解析用户类型
-            if (!string.IsNullOrEmpty(message.Params.employeeNoString))
-            {
-                if (message.Params.employeeNoString.StartsWith("01")) // Student
-                {
-                    userid = Convert.ToInt32(message.Params.employeeNoString.Substring(2));
-                    UserType = 1;
-                }
-                else if (message.Params.employeeNoString.StartsWith("02")) // Parent
-                {
-                    userid = Convert.ToInt32(message.Params.employeeNoString.Substring(2));
-                    UserType = 2;
-                }
-                else if (message.Params.employeeNoString.StartsWith("03")) // Staff
-                {
-                    userid = Convert.ToInt32(message.Params.employeeNoString.Substring(2));
-                    UserType = 3;
-                }
-            }
-
-            string picSave = string.Empty;
-            string picUrl = string.Empty;
-
-            if (!string.IsNullOrEmpty(message.Params.PicDataUrl))
-            {
-                if (m_struServInfo.dwPicServerType == 2) // 云存储
-                {
-                    picUrl = $"http://{PicServerip}:{PicServerPort}" + message.Params.PicDataUrl;
-                }
-                else if (m_struServInfo.dwPicServerType == 3) // KMS
-                {
-                    picUrl = message.Params.PicDataUrl;
-                }
-                fileName = new StringBuilder(128)
-                   .Append(message.Params.DeviceID)
-                   .Append('_')
-                   .Append(shuaTime.ToString("yyyyMMddHHmmss"))
-                   .Append('_').Append(UserType).Append('_')
-                   .Append(userid).Append(".jpeg").ToString();
-
-                picSave = DownloadPic(settings.IsDownloadPic, picUrl, fileName);
-            }
-            string eventType = !string.IsNullOrWhiteSpace(picUrl) == true ? "196893" : "198914";
-            // 如果启用了消息队列，发送事件数据
-            if (settings.IsMessageQueue)
-            {
-                global::ISUPSDK.AccessControl.WebApi.Events events = new()
-                {
-                    eventId = message.Params.DeviceID + eventType + UserType + userid.ToString() + message.Params.Time,
-                    eventType = eventType,
-                    happenTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    srcName = message.Params.DeviceID,
-                    srcParentIndex = "",
-                    srcType = "人脸机",
-                    data = new ExtData()
-                    {
-                        ExtEventCardNo = CardNo,
-                        ExtEventInOut = 0,
-                        ExtEventPictureURL = picUrl,
-                        ExtEventPersonNo = userid.ToString(),
-                        UserType = UserType,
-                        Time = shuaTime,
-                        ExtEventPicture = picSave
-                    }
-                };
-
-                var inputXml = JsonHepler.ToJson(events);
-                try
-                {
-                    using MessageQueue mq = MessageQueueHepler.Create(settings.MessageQueueAddress);
-                    mq.Send(inputXml);
-                }
-                catch (Exception ex)
-                {
-                    LogException("SendSetMessage.txt", ex);
-                    //使用
-
-                    // 处理消息队列发送失败的情况
-                    DownloadPic(true, picUrl, fileName,true);
-                }
-            }
-        }
-
+        // 报警报文的 MinorType 判定、图片下载与下游队列转发已统一移到
+        // Services/Events/AcsAlarmForwardService.cs（由 AcsEventQueueConsumerService 在
+        // 消费队列消息时调用）：生产端只负责把原始报文入队，不做业务判定。
 
         /// <summary>
         /// 清理过期文件
@@ -1744,6 +1546,15 @@ private ConcurrentDictionary<string, DeviceSyncState> AllTask = new();
 
         /// <summary>当前生效的配置（appsettings.json 的 Settings 节）。</summary>
         public Settings CurrentSettings => settings;
+
+        /// <summary>图片服务器 IP（消费者侧回取报警图片时用于拼 URL，来自 ISUPDemo.xml 的 AddressMap）。</summary>
+        public string PictureServerIp => PicServerip;
+
+        /// <summary>图片服务器端口。</summary>
+        public int PictureServerPort => PicServerPort;
+
+        /// <summary>图片服务器类型：2-云存储，3-KMS（其它值表示图片地址直接取自报文）。</summary>
+        public int PictureServerType => m_struServInfo.dwPicServerType;
 
         /// <summary>CMS 设备注册监听句柄，-1 表示未启动。</summary>
         public int ListenHandle => CmsListenHandle;

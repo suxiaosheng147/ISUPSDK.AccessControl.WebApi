@@ -51,10 +51,19 @@ public static class IsupAccessControlModule
         // 注册为 HostedService：确保 DI 真正实例化它（否则订阅不会建立，事件进不了队列）。
         builder.Services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<IsupEventIngestService>());
 
-        // ---- 历史事件对账补漏：定时从设备拉取，补齐回调丢失的缺口 ----
+        // ---- 设备 ISAPI 直连（HTTP Digest）：对账优先通道，可直接取回人脸事件抓拍图 ----
+        // 配置节：ISUP:IsapiDigest（设备 IP / 编号 / 账号 / 密码，可配多台）。
+        builder.Services.Configure<IsapiDigestOptions>(builder.Configuration.GetSection(IsapiDigestOptions.SectionName));
+        builder.Services.AddSingleton<IsapiDigestClient>();
+
+        // ---- 历史事件对账补漏：优先 Digest 直连，失败回退 SDK 透传 ----
         builder.Services.Configure<AcsEventReconcileOptions>(builder.Configuration.GetSection(AcsEventReconcileOptions.SectionName));
         builder.Services.AddSingleton<AcsEventReconcileService>();
         builder.Services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<AcsEventReconcileService>());
+
+        // ---- Digest 高频轮询：抓拍图会被设备覆盖，短间隔拉取尽量把图取回来 ----
+        builder.Services.AddSingleton<IsapiDigestPollService>();
+        builder.Services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<IsapiDigestPollService>());
 
         // ---- 异步下发任务库（SQLite + EF Core）----
         builder.Services.AddDbContextFactory<AcsTaskDbContext>(options =>

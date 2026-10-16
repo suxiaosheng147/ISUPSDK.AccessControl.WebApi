@@ -97,8 +97,10 @@ public sealed class IsupAmsService
             IsAccessControl = IsAccessControlEvent(eventType, subEventType),
             Payload = e.Payload,
             PayloadFormat = "xml",
-            // 设备主动上报的报警：不做去重，照单入库。
-            SkipDedup = true,
+            // 去重键为 deviceId:serialNo:事件时间（XML 报文的 <serialNo> / <Time> 已在
+            // AcsEventSpool.ExtractSerialNo / ExtractEventTimeKey 中解析），与历史对账 / HTTP 推送共用同一键：
+            // 因此同一条设备事件无论走"回调 + 对账"还是被设备重发，入库时都按 DedupHash 幂等，只会留下一行。
+            SkipDedup = false,
             PayloadBytes = e.Payload?.Length ?? 0,
         });
     }

@@ -35,6 +35,9 @@ public sealed class AcsEventStore
 
     private int _schemaReady = -1;
 
+    /// <summary>没有新增入库时的空键集合（避免重复分配）。</summary>
+    private static readonly IReadOnlySet<string> EmptyInsertedKeys = new HashSet<string>(StringComparer.Ordinal);
+
     private DateTimeOffset? _lastStoredAt;
     private DateTimeOffset? _lastErrorAt;
     private string? _lastError;
@@ -150,7 +153,7 @@ public sealed class AcsEventStore
     {
         if (batch.Count == 0 || !_options.Enabled)
         {
-            return new AcsEventWriteResult(0, 0, true, null);
+            return new AcsEventWriteResult(0, 0, true, null, EmptyInsertedKeys);
         }
 
         try
@@ -184,7 +187,7 @@ public sealed class AcsEventStore
 
             if (fresh.Count == 0)
             {
-                return new AcsEventWriteResult(0, skipped, true, null);
+                return new AcsEventWriteResult(0, skipped, true, null, EmptyInsertedKeys);
             }
 
             var inserted = await SaveAsync(db, fresh, ct).ConfigureAwait(false);
@@ -208,7 +211,12 @@ public sealed class AcsEventStore
                 _logger.LogDebug("事件入库：新增 {Inserted} 行，跳过重复 {Skipped} 行。", inserted, skipped);
             }
 
-            return new AcsEventWriteResult(inserted, skipped, true, null);
+            return new AcsEventWriteResult(
+                inserted,
+                skipped,
+                true,
+                null,
+                fresh.Select(record => record.DedupKey).ToHashSet(StringComparer.Ordinal));
         }
         catch (OperationCanceledException)
         {

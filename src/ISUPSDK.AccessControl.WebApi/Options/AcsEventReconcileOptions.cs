@@ -40,4 +40,13 @@ public sealed class AcsEventReconcileOptions
 
     /// <summary>为空表示对所有在线 OTAP 设备对账；否则仅对列表内的设备 ID。</summary>
     public List<string> Devices { get; set; } = new();
+
+    /// <summary>
+    /// 启动时若事件表为空，是否自动补一次历史（首次部署 / 换库后回填用）。
+    /// <para>只在表里确实 0 行时触发；补历史区间不推进定时对账的增量基准。</para>
+    /// </summary>
+    public bool StartupBackfillWhenEmpty { get; set; } = true;
+
+    /// <summary>启动补历史的回看天数（<see cref="StartupBackfillWhenEmpty"/> 为 true 时使用）。</summary>
+    public int StartupBackfillDays { get; set; } = 60;
 }

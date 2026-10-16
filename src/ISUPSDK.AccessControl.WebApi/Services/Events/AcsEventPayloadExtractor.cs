@@ -148,6 +148,8 @@ internal static class AcsEventPayloadExtractor
         record.Major ??= ParseXmlInt(xml, "MajorType", 16);
         record.Minor ??= ParseXmlInt(xml, "MinorType", 16);
         record.CardNo ??= Truncate(ReadXml(xml, "CardNo"), 64);
+        // 工号：PPVSPMessage 的标签是 employeeNoString（与 ISAPI JSON 同名），此前漏解析导致工号列为空。
+        record.EmployeeNo ??= Truncate(ReadXml(xml, "employeeNoString"), 64);
         record.VerifyMode ??= Truncate(ReadXml(xml, "currentVerifyMode"), 64);
 
         var time = ReadXml(xml, "Time");
