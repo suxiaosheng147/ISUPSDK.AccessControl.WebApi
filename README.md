@@ -16,7 +16,10 @@
 ISUPSDK.AccessControl/
 ├── ISUPSDK.AccessControl.sln
 ├── run.ps1
-├── docs/CONSOLE_TO_WEBAPI.md
+├── docs/
+│   ├── CONSOLE_TO_WEBAPI.md
+│   ├── event-store-{sqlite,mysql,sqlserver}.sql  # 事件表建表脚本（EventStore:AutoCreate=false 时人工执行）
+│   └── task-store-{sqlite,mysql,sqlserver}.sql   # 任务表建表脚本（供 DBA 预建 / 核对表结构）
 └── src/ISUPSDK.AccessControl.WebApi/
     ├── Program.cs                     # 只做编排：注册模块 → 装配管道 → 映射端点
     ├── Modules/                       # 模块化装配
@@ -259,6 +262,105 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
   再截到第一个完整 JSON 值（设备常在正文后跟 `0x03` 结束符或零填充/残留字节）；
   日志里出现"响应无法解析为 JSON"时，看该告警附带的响应片段。
 - 保留策略：`ISUP:EventStore:RetentionDays > 0` 时按 `RetentionSweepHours` 周期清理过期事件。
+
+#### 事件库的数据库选择
+
+| Provider | 配置 | 说明 |
+|---|---|---|
+| `Sqlite`（默认） | `SqlitePath: "./storage/acs-events.db"` | 零外部依赖，单文件；与任务库 `acs-tasks.db` 分开 |
+| `MySql` | `ConnectionString` + `ServerVersion`（如 `8.0.36`） | Pomelo provider；不做版本自动探测，避免库未就绪时启动失败 |
+| `SqlServer` | `ConnectionString` | Microsoft provider（EF Core 8 支持 SQL Server 2012+） |
+
+> 任务库（异步下发任务，配置节 `ISUP:TaskQueue`）与事件库是两套独立的 EF Core 上下文，
+> 各自用 `Provider` 选择数据库（见下节），可以是不同的库；两者在同一进程里并存没有冲突。
+
+**SQL Server 的连接串必须带 `TrustServerCertificate=true`（或 `Encrypt=false`）**：
+
+```jsonc
+"EventStore": {
+  "Enabled": true,
+  "Provider": "SqlServer",
+  "ConnectionString": "Server=192.168.1.124,1433;Database=acs;User Id=sa;Password=<密码>;TrustServerCertificate=true;Encrypt=false;Connect Timeout=15",
+  "AutoCreate": true
+}
+```
+
+- 原因：Microsoft.Data.SqlClient 4.0 起默认 `Encrypt=true`，现场 SQL Server 多为自签证书，
+  不带这一项会以"证书链是由不受信任的颁发机构颁发的"连接失败。
+- `Provider` 值写错（如 `"SQL Server"` 带空格、`"MSSQL"`）会**静默回退 Sqlite**（`ResolveProvider()`
+  只回退、不告警），切库后请用 `GET /api/events/status` 的 `provider` 字段核对实际生效的库。
+- `Provider=MySql/SqlServer` 时 `ConnectionString` 必填。漏配不会让进程启动失败，但事件库整体不可用：
+  `/health` 与 `GET /api/events/status` 的 `schemaReady=false` / `lastError` 给出原因，事件一条都进不去。
+- 时间列在三种库里都存成 UTC ticks（`bigint`），读回按 `ISUP:Time:TimeZone`（默认北京时间）还原偏移；
+  查询这些列时要用变量传参（内联常量写法在 SQL Server 上会报 `datetimeoffset 与 bigint 不兼容`）。
+
+**建表两种方式（二选一）**：
+
+1. **让服务自动建表**：`EventStore:AutoCreate=true`（默认；库不存在时 EF Core 自动建库建表，
+   SQL Server 上需要建库权限）；
+2. **由 DBA 手工执行 DDL**：`EventStore:AutoCreate=false`，然后执行随仓库提供的脚本：
+
+   | 数据库 | 脚本 |
+   |---|---|
+   | SQLite | [docs/event-store-sqlite.sql](docs/event-store-sqlite.sql) |
+   | MySQL / MariaDB | [docs/event-store-mysql.sql](docs/event-store-mysql.sql) |
+   | SQL Server | [docs/event-store-sqlserver.sql](docs/event-store-sqlserver.sql) |
+
+   脚本由 EF Core 的 `Database.GenerateCreateScript()` 生成，与实体模型严格一致
+   （含唯一索引 `UX_AcsEvents_DedupHash` —— 幂等入库的关键，**不要省略**）。
+
+   > ⚠ `AutoCreate=false` 且表不存在时，事件一条都进不去。服务会在启动时探测并明确报错：
+   > `/health` 与 `GET /api/events/status` 的 `schemaReady=false` / `schemaError` 给出原因与应执行的脚本；
+   > `GET /api/events` 返回 `503` 而不是裸的数据库异常。
+
+> `EnsureCreated` 只建库/建表、不做列迁移：实体新增列后，换库或升级时要重建表（或用脚本补齐列），
+> 否则相关查询会因缺列报错。
+
+#### 任务库（异步下发）的数据库选择
+
+人员 / 卡片 / 人脸的新增、修改、删除是**异步任务**：接口先把请求入队并返回任务 ID，
+由 `AcsTaskWorker` 定时取出执行，调用方凭 `GET /api/tasks/{id}` 查询结果。
+任务库的配置节是 `ISUP:TaskQueue`，与事件库完全独立：
+
+| Provider | 配置 | 说明 |
+|---|---|---|
+| `Sqlite`（默认） | `DatabasePath: "./storage/acs-tasks.db"` | 零外部依赖，单文件；路径按程序目录（`AppContext.BaseDirectory`）解析 |
+| `MySql` | `ConnectionString` + `ServerVersion`（如 `8.0.36`） | Pomelo provider；不做版本自动探测 |
+| `SqlServer` | `ConnectionString` | Microsoft provider（EF Core 8 支持 SQL Server 2012+） |
+
+```jsonc
+"TaskQueue": {
+  "Enabled": true,
+  "Provider": "SqlServer",
+  "ConnectionString": "Server=192.168.1.124,1433;Database=acs;User Id=sa;Password=<密码>;TrustServerCertificate=true;Encrypt=false;Connect Timeout=15"
+}
+```
+
+- 连接串同样必须带 `TrustServerCertificate=true`（或 `Encrypt=false`），原因见上节。
+- `Provider` 写错同样会静默回退 Sqlite；切库后看启动日志"下发任务队列已启动：库=…"核对实际生效的库。
+- 非 Sqlite 时 `ConnectionString` 必填：**任务库漏配会让服务启动阶段直接失败**（启动就要建表）；
+  事件库则是"启动不失败、只把事件库标记为不可用" —— 任务库取快速失败，避免任务静默堆积。
+- 建表：服务启动固定执行 `EnsureCreated`（任务库没有 `AutoCreate` 开关），老库缺 `PayloadFormat`
+  列时启动会自动补列（SQL Server 用 `ADD PayloadFormat …`，不带 `COLUMN` 关键字）。
+  需要预先建表或核对结构时用脚本：
+
+  | 数据库 | 脚本 |
+  |---|---|
+  | SQLite | [docs/task-store-sqlite.sql](docs/task-store-sqlite.sql) |
+  | MySQL / MariaDB | [docs/task-store-mysql.sql](docs/task-store-mysql.sql) |
+  | SQL Server | [docs/task-store-sqlserver.sql](docs/task-store-sqlserver.sql) |
+
+> **切库提醒**：换到 MySQL / SQL Server 后，原 SQLite 文件里的任务历史不会自动迁移，
+> 未执行完的 `Pending` 任务建议先跑完再切。
+> **多实例**：`AcsTaskService.TakeDueAsync` 用数据库层的**条件更新**抢任务
+> （`update AcsTasks set Status = Running, StartedAt = ? where Id = ? and Status = Pending`，
+> 只有影响 1 行的实例才真正拿到该任务），所以多进程 / 多台机器共享同一个任务库时，
+> 同一条任务只会被下发一次；单实例下每轮的额外开销是至多 `BatchSize` 次主键小更新。
+> 仍需注意两点：
+> 1. 执行中实例崩溃时任务会停在 `Running`，需要人工 `POST /api/tasks/{id}/retry`；
+> 2. `TaskQueue:BinaryDirectory`（人脸图片等附件）仍是本地磁盘，多实例需改用共享目录。
+> SQLite 单文件在多实例下还有写锁竞争，多实例建议用 MySQL / SQL Server。
+
 ### 5.1 ISAPI 透传底座
 
 所有门禁业务最终都经 `IsupCmsService.SendIsapiAsync` 透传到设备，

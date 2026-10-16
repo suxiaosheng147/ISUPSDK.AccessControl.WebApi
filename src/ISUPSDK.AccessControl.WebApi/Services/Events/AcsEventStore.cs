@@ -142,7 +142,7 @@ public sealed class AcsEventStore
         var script = $"docs/event-store-{(provider == "sqlite" ? "sqlite" : provider == "mysql" ? "mysql" : "sqlserver")}.sql";
 
         return $"事件表 {TableName} 不可用：{raw}。" +
-               $"请执行建表脚本 {script}（详见 README 4.11），或把 ISUP:EventStore:AutoCreate 设为 true 让服务自动建表。";
+               $"请执行建表脚本 {script}（详见 README 5.2），或把 ISUP:EventStore:AutoCreate 设为 true 让服务自动建表。";
     }
 
     /// <summary>批量写入一批事件，返回写入结果（重复行计入 <see cref="AcsEventWriteResult.Skipped"/>）。</summary>

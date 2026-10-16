@@ -46,7 +46,8 @@ public sealed class AcsTaskWorker : BackgroundService
         }
 
         _logger.LogInformation(
-            "下发任务队列已启动：轮询={Poll}s，批量={Batch}，离线重试={Offline}s，临时错误重试上限={Max}。",
+            "下发任务队列已启动：库={Provider}，轮询={Poll}s，批量={Batch}，离线重试={Offline}s，临时错误重试上限={Max}。",
+            _options.Provider,
             _options.PollSeconds,
             _options.BatchSize,
             _options.OfflineRetrySeconds,

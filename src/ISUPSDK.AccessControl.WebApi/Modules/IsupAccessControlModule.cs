@@ -65,24 +65,9 @@ public static class IsupAccessControlModule
         builder.Services.AddSingleton<IsapiDigestPollService>();
         builder.Services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<IsapiDigestPollService>());
 
-        // ---- 异步下发任务库（SQLite + EF Core）----
-        builder.Services.AddDbContextFactory<AcsTaskDbContext>(options =>
-        {
-            var path = builder.Configuration["ISUP:TaskQueue:DatabasePath"];
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                path = "./storage/acs-tasks.db";
-            }
-
-            var fullPath = Path.GetFullPath(path, AppContext.BaseDirectory);
-            var directory = Path.GetDirectoryName(fullPath);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            options.UseSqlite($"Data Source={fullPath}");
-        });
+        // ---- 异步下发任务库（EF Core，可切换 SQLite / SQL Server / MySQL）----
+        // 配置节：ISUP:TaskQueue（Provider / ConnectionString / DatabasePath）。
+        builder.Services.AddAcsTaskStore(builder.Configuration);
 
         builder.Services.AddSingleton<AcsTaskService>();
         builder.Services.AddSingleton<AcsTaskExecutor>();
@@ -102,12 +87,19 @@ public static class IsupAccessControlModule
         {
             taskDb.Database.EnsureCreated();
 
-            // EnsureCreated 只建库、不补列：老库升级后需要补一次（SQLite 支持 ADD COLUMN），
+            // EnsureCreated 只建库、不补列：老库升级后需要补一次，
             // 否则查询 AcsTask 会因缺少 PayloadFormat 列而报错。
+            // 语句按 provider 生成：SQL Server 不接受 ADD COLUMN 里的 COLUMN 关键字，
+            // MySQL 的 TEXT/BLOB 列不允许带 DEFAULT，故各自用对应写法（当前任务库默认 SQLite）。
+            var addPayloadFormatColumn = taskDb.Database.IsSqlServer()
+                ? "ALTER TABLE AcsTasks ADD PayloadFormat nvarchar(16) NOT NULL DEFAULT 'json'"
+                : taskDb.Database.IsMySql()
+                    ? "ALTER TABLE AcsTasks ADD COLUMN PayloadFormat varchar(16) NOT NULL DEFAULT 'json'"
+                    : "ALTER TABLE AcsTasks ADD COLUMN PayloadFormat TEXT NOT NULL DEFAULT 'json'";
+
             try
             {
-                taskDb.Database.ExecuteSqlRaw(
-                    "ALTER TABLE AcsTasks ADD COLUMN PayloadFormat TEXT NOT NULL DEFAULT 'json'");
+                taskDb.Database.ExecuteSqlRaw(addPayloadFormatColumn);
             }
             catch (Exception)
             {

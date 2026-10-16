@@ -7,7 +7,7 @@ using Microsoft.Extensions.Options;
 namespace ISUPSDK.AccessControl.WebApi.Services.Tasks;
 
 /// <summary>
-/// 异步下发任务的持久化与查询（EF Core + SQLite）。
+/// 异步下发任务的持久化与查询（EF Core，库由 <c>ISUP:TaskQueue:Provider</c> 选择）。
 /// 入队、列表、查询、重试、取消都走这里；后台执行由 <see cref="AcsTaskWorker"/> 驱动。
 /// </summary>
 public sealed class AcsTaskService
@@ -16,7 +16,10 @@ public sealed class AcsTaskService
     private readonly AcsTaskQueueOptions _options;
     private readonly ILogger<AcsTaskService> _logger;
 
-    /// <summary>串行化"取任务 + 标记 Running"，避免多轮并发重复执行。</summary>
+    /// <summary>
+    /// 单实例内串行化"取任务"（减少同一实例并发调用时的无谓争抢）；
+    /// 跨实例 / 跨进程的互斥由数据库层的条件更新保证，见 <see cref="TakeDueAsync"/>。
+    /// </summary>
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public AcsTaskService(
@@ -168,7 +171,22 @@ public sealed class AcsTaskService
         return true;
     }
 
-    /// <summary>取出到期可执行的任务并标记为 Running（供后台执行器使用）。</summary>
+    /// <summary>
+    /// 取出到期可执行的任务并原子地标记为 Running（供后台执行器使用）。
+    ///
+    /// "取"分两步：先按到期条件取候选 ID，再逐条做 <c>Status = Pending</c> 的条件更新。
+    /// 只有条件更新影响 1 行的实例才真正拿到该任务，因此多个进程 / 多台机器共享同一个任务库时，
+    /// 同一条任务只会被其中一个实例执行一次（原先的"查出实体 → 改状态 → SaveChanges"
+    /// 在数据库层面不是原子的，多实例会重复下发）。
+    ///
+    /// 之所以逐条更新、而不是一条批量更新：批量更新只返回总影响行数，无法判断"哪些行归我"
+    /// （用时间戳之类的标记不可靠 —— 同进程内的两个实例可能取到相同的时间戳），
+    /// 而逐条更新的返回值为 1 就是明确的归属。单轮最多 <c>batchSize</c>（默认 20）次主键小更新，
+    /// 代价可接受。
+    ///
+    /// 已知限制：实例在执行过程中崩溃时任务会停在 Running，需要人工重试
+    /// （<c>POST /api/tasks/{id}/retry</c>）。
+    /// </summary>
     public async Task<List<AcsTask>> TakeDueAsync(int batchSize, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -177,26 +195,50 @@ public sealed class AcsTaskService
             await using var db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;
 
-            var due = await db.Tasks
+            var candidates = await db.Tasks
+                .AsNoTracking()
                 .Where(t => t.Status == AcsTaskStatus.Pending && t.NextAttemptAt <= now)
                 .OrderBy(t => t.CreatedAt)
                 .Take(Math.Clamp(batchSize, 1, 500))
+                .Select(t => t.Id)
                 .ToListAsync(ct)
                 .ConfigureAwait(false);
 
-            if (due.Count == 0)
+            if (candidates.Count == 0)
             {
-                return due;
+                return new List<AcsTask>();
             }
 
-            foreach (var task in due)
+            var claimed = new List<string>(candidates.Count);
+
+            foreach (var id in candidates)
             {
-                task.Status = AcsTaskStatus.Running;
-                task.StartedAt = now;
+                // 条件更新：只有把该行从 Pending 改成 Running 成功的实例才拿到它（影响行数为 0 = 被抢先）。
+                var affected = await db.Tasks
+                    .Where(t => t.Id == id && t.Status == AcsTaskStatus.Pending)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(t => t.Status, AcsTaskStatus.Running)
+                            .SetProperty(t => t.StartedAt, now),
+                        ct)
+                    .ConfigureAwait(false);
+
+                if (affected == 1)
+                {
+                    claimed.Add(id);
+                }
             }
 
-            await db.SaveChangesAsync(ct).ConfigureAwait(false);
-            return due;
+            if (claimed.Count == 0)
+            {
+                return new List<AcsTask>();
+            }
+
+            return await db.Tasks
+                .AsNoTracking()
+                .Where(t => claimed.Contains(t.Id))
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
         }
         finally
         {

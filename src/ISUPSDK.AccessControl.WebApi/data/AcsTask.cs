@@ -61,7 +61,7 @@ public enum AcsTaskStatus
 }
 
 /// <summary>
-/// 一条下发的异步任务（EF Core 实体，存 SQLite）。
+/// 一条下发的异步任务（EF Core 实体，落 <c>ISUP:TaskQueue</c> 指定的数据库：Sqlite / MySql / SqlServer）。
 ///
 /// 写操作（人员/卡片/人脸的新增、修改、删除）先入库为 Pending，由
 /// <c>AcsTaskWorker</c> 定时取出执行；调用方凭 <see cref="Id"/> 查询执行结果。

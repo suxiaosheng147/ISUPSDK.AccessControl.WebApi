@@ -6,7 +6,8 @@ using Microsoft.Extensions.Options;
 namespace ISUPSDK.AccessControl.WebApi.Data;
 
 /// <summary>
-/// 异步下发任务的 EF Core 上下文（SQLite）。
+/// 异步下发任务的 EF Core 上下文（Sqlite / MySql / SqlServer 共用同一份实体定义；
+/// provider 由 <c>ISUP:TaskQueue:Provider</c> 选择，见 <c>AcsTaskStoreRegistration</c>）。
 /// </summary>
 public sealed class AcsTaskDbContext : DbContext
 {

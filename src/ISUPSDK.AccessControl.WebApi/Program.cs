@@ -22,7 +22,7 @@ var app = builder.Build();
 // 接入统一日志门面：此后 Common.WriteFile* 与 SDK 回调日志都进入 ILogger。
 app.UseIsupSdk();
 
-// 任务库建表（SQLite 轻量场景）。
+// 任务库 / 事件库建表（轻量场景直接用 EnsureCreated）。
 await app.EnsureIsupAccessControlStorageAsync();
 
 app.UseIsupApi();
