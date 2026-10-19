@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>使用前先填顶部三项</h2>
+      <div class="kv">
+        <dt>API 基址</dt>
+        <dd>KrAdmin.API 的地址，例如 <code>https://localhost:5001</code>（不要带结尾斜杠）</dd>
+        <dt>Token</dt>
+        <dd>登录 KrAdmin 拿到的 <code>access_token</code>，请求会带上 <code>Authorization: bearer &lt;token&gt;</code></dd>
+        <dt>环境</dt>
+        <dd>对应配置库里的 <code>RemoteServiceConfig.Environment</code>（PROD / UAT / TEST / DEV）；留空由服务端按宿主环境判定</dd>
+      </div>
+      <p class="hint">
+        页面只负责调接口，配置保存在浏览器 localStorage（换浏览器或清缓存需要重新填）。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>连通性检查</h2>
+      <div class="btnrow">
+        <button class="primary" id="btnCheck">一键检查（服务状态 / 设备 / 报警监听）</button>
+        <button id="btnRaw">查看原始响应</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="checkResult" class="row" style="margin-top:12px;gap:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>接口清单（12 个资源 / 85 个接口）</h2>
+      <div id="pageTable"></div>
+      <p class="hint">
+        全部接口都是 REST 风格：路径只用名词，动作交给 HTTP 方法（GET / POST / PUT / PATCH / DELETE）。
+        分页统一使用 <code>pageSize</code> / <code>pageIndex</code>（首页从 1 开始），返回 <code>PageModel&lt;T&gt;</code>。
+      </p>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '门禁对接控制台', active: 'index.html' });
+
+    var PAGES_INFO = [
+      { name: '设备 devices', count: 9, href: 'devices.html', desc: '列表/详情/SDK 状态/监听器/强制下线/ISAPI 透传/HTTP 上报配置' },
+      { name: '服务状态 system', count: 1, href: 'system.html', desc: '门禁服务进程运行状态' },
+      { name: '人员 persons', count: 12, href: 'persons.html', desc: '分页查询/新增/修改/覆盖/删除/批量/清空/数量/能力集' },
+      { name: '卡片 cards', count: 10, href: 'cards.html', desc: '分页查询/新增/修改/删除/批量/按工号删/清空' },
+      { name: '人脸 faces', count: 10, href: 'faces.html', desc: '分页查询/三种上传方式/删除 + 人脸库增删改查' },
+      { name: '门禁控制 doors', count: 5, href: 'doors.html', desc: '能力集/工作状态/门状态/设置门状态/输出触发' },
+      { name: '权限计划 access-plans', count: 15, href: 'access-plans.html', desc: '模板/周计划/假日组/假日计划的查询与写入 + 工作日预设' },
+      { name: '事件 events', count: 9, href: 'events.html', desc: '分页查询/详情/抓拍图/可选值/管道状态/补录/重放/对账' },
+      { name: '报警 alarms', count: 6, href: 'alarms.html', desc: '监听状态/监听器/实时事件/单条详情/清空缓冲' },
+      { name: '下发任务 tasks', count: 4, href: 'tasks.html', desc: '任务列表/详情/重试/取消' },
+      { name: '图片存储 storage', count: 4, href: 'storage.html', desc: '存储状态/文件列表/下载/删除' }
+    ];
+
+    ACS.table('pageTable', [
+      { text: '资源', render: function (r) { return '<a href="' + r.href + '">' + ACS.esc(r.name) + '</a>'; } },
+      { text: '接口数', render: function (r) { return '<span class="tag acs">' + r.count + '</span>'; } },
+      { text: '能力', cls: 'wrap', render: function (r) { return ACS.esc(r.desc); } }
+    ], PAGES_INFO);
+
+    var lastRaw = null;
+
+    ACS.el('btnCheck').addEventListener('click', async function () {
+      var button = ACS.el('btnCheck');
+      button.disabled = true;
+      ACS.msg('msg', '', '');
+      ACS.el('checkResult').innerHTML = '';
+      var items = [];
+
+      try {
+        var sys = await ACS.api('/api/acs/system');
+        items.push({ ok: true, text: '服务状态：SDK 初始化 ' + (sys && sys.sdkInitialized) + '，在线设备 ' + (sys && sys.onlineDeviceCount) });
+
+        var devices = await ACS.api('/api/acs/devices', { query: { onlineOnly: false } });
+        items.push({ ok: true, text: '设备列表：' + ((devices && devices.length) || 0) + ' 台' + (devices && devices.length ? '（' + devices[0].deviceId + '）' : '') });
+
+        var alarms = await ACS.api('/api/acs/alarms/status');
+        items.push({ ok: true, text: '报警监听：' + (alarms && alarms.initialized ? '已初始化' : '未初始化') + '，缓冲 ' + ((alarms && alarms.buffered) || 0) + ' 条' });
+
+        ACS.msg('msg', 'ok', '后端连通，三项接口均返回成功。');
+      } catch (e) {
+        ACS.msg('msg', 'err', e.message || String(e));
+      } finally {
+        button.disabled = false;
+        ACS.el('checkResult').innerHTML = items.map(function (i) {
+          return '<span class="tag ' + (i.ok ? 'ok' : 'err') + '">' + ACS.esc(i.text) + '</span>';
+        }).join('');
+      }
+    });
+
+    ACS.el('btnRaw').addEventListener('click', async function () {
+      ACS.msg('msg', '', '');
+      try {
+        lastRaw = await ACS.api('/api/acs/system', { raw: true });
+        ACS.msg('msg', 'ok', '原始响应：\n' + JSON.stringify(lastRaw, null, 2));
+      } catch (e) {
+        ACS.msg('msg', 'err', e.message || String(e));
+      }
+    });
+  </script>
+</body>
+
+</html>

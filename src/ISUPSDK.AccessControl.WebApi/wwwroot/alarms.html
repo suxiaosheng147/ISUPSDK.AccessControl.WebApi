@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>报警 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>报警监听状态 <code>GET /api/acs/alarms/status</code></h2>
+      <div class="row">
+        <button class="primary" id="btnStatus">刷新状态</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="summary" class="row" style="margin-top:10px;gap:10px"></div>
+      <pre class="json" id="statusJson" style="margin-top:10px">（监听状态）</pre>
+    </div>
+
+    <div class="card">
+      <h2>实时事件（内存缓冲）<code>GET /api/acs/alarms/events</code></h2>
+      <p class="hint">这里是 SDK 报警回调收到的实时事件；已入库的历史事件请到「事件」页查看。门禁服务只支持 limit，因此只有 pageSize。</p>
+      <div class="row">
+        <label class="field"><span>设备 ID</span><input id="deviceId" placeholder="模糊匹配"></label>
+        <label class="field"><span>事件类型</span><input id="eventType" placeholder="如 AcsEvent"></label>
+        <label class="field"><span>来源</span><input id="source" placeholder="Isapi/IsupJson…"></label>
+        <label class="field"><span>起始序号</span><input id="afterSequence" placeholder="增量拉取用"></label>
+        <label class="field"><span>关键字</span><input id="keyword"></label>
+        <label class="check"><input type="checkbox" id="accessControlOnly"> 仅门禁事件</label>
+        <label class="check"><input type="checkbox" id="includePayload" checked> 含报文</label>
+        <label class="field"><span>条数</span><input id="pageSize" type="number" value="10" min="1" max="200"></label>
+        <button class="primary" id="btnEvents">查询</button>
+      </div>
+      <div id="msg2" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <h2>单条事件 <code>GET /api/acs/alarms/events/{sequence}</code></h2>
+        <div class="row">
+          <label class="field"><span class="req">序号</span><input id="sequence" placeholder="如 6"></label>
+          <button id="btnOne">查询</button>
+          <button class="danger" id="btnClear">清空缓冲 DELETE /events</button>
+        </div>
+        <div id="msg3" class="msg hidden"></div>
+        <pre class="json" id="oneJson" style="margin-top:10px">（单条事件）</pre>
+      </div>
+
+      <div class="card">
+        <h2>报警监听器</h2>
+        <div class="row">
+          <label class="field"><span>监听 IP（可选）</span><input id="listenIp" placeholder="留空用默认"></label>
+          <label class="field"><span>监听端口（可选）</span><input id="listenPort" placeholder="留空用默认"></label>
+          <button class="primary" id="btnListenAdd">新建监听 POST /listeners</button>
+        </div>
+        <div class="row">
+          <label class="field"><span>句柄</span><input id="listenHandle" placeholder="如 0/1/2"></label>
+          <button class="danger" id="btnListenDel">关闭监听 DELETE /listeners/{handle}</button>
+        </div>
+        <div id="msg4" class="msg hidden"></div>
+        <pre class="json" id="listenJson" style="margin-top:10px">（监听器操作结果）</pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '报警', active: 'alarms.html' });
+
+    function tag(ok, text) {
+      return '<span class="tag ' + (ok ? 'ok' : 'err') + '">' + ACS.esc(text) + '</span>';
+    }
+
+    ACS.el('btnStatus').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/alarms/status');
+        ACS.showJson('statusJson', data);
+        ACS.el('summary').innerHTML = [
+          tag(data && data.enabled, '监听 ' + (data && data.enabled ? '启用' : '停用')),
+          tag(data && data.initialized, 'SDK ' + (data && data.initialized ? '已初始化' : '未初始化')),
+          '<span class="tag acs">缓冲 ' + ((data && data.buffered) || 0) + ' 条</span>',
+          '<span class="tag acs">累计接收 ' + ((data && data.totalReceived) || 0) + '</span>',
+          '<span class="tag acs">门禁事件 ' + ((data && data.accessControlEvents) || 0) + '</span>',
+          '<span class="tag">监听地址 ' + ACS.esc((data && data.listenAddress) || '-') + '</span>'
+        ].join('');
+      }, '已刷新监听状态');
+    });
+
+    ACS.el('btnEvents').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var data = await ACS.api('/api/acs/alarms/events', {
+          query: {
+            deviceId: ACS.el('deviceId').value.trim(),
+            eventType: ACS.el('eventType').value.trim(),
+            source: ACS.el('source').value.trim(),
+            afterSequence: ACS.el('afterSequence').value.trim(),
+            keyword: ACS.el('keyword').value.trim(),
+            accessControlOnly: ACS.el('accessControlOnly').checked ? 'true' : '',
+            includePayload: ACS.el('includePayload').checked ? 'true' : 'false',
+            pageSize: ACS.el('pageSize').value.trim()
+          }
+        });
+
+        var page = data || {};
+        var rows = page.pageData || [];
+
+        ACS.table('table', [
+          { text: '序号', render: function (r) { return ACS.esc(r.sequence); } },
+          { text: '接收时间', render: function (r) { return ACS.fmtTime(r.receivedAt); } },
+          { text: '设备', render: function (r) { return ACS.esc(r.deviceId); } },
+          { text: '事件类型', render: function (r) { return ACS.esc(r.eventType || ''); } },
+          { text: '子类型', render: function (r) { return ACS.esc(r.subEventType || ''); } },
+          { text: '门禁', render: function (r) { return r.isAccessControl ? '<span class="tag acs">是</span>' : '<span class="tag">否</span>'; } },
+          { text: '来源', render: function (r) { return ACS.esc(r.source || ''); } },
+          { text: '操作', cls: 'op', render: function (r) { return '<button data-seq="' + ACS.esc(r.sequence) + '">详情</button>'; } }
+        ], rows, '缓冲里没有事件（LatestSequence=' + (page.latestSequence || 0) + '）');
+
+        document.querySelectorAll('#table button[data-seq]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            ACS.el('sequence').value = button.getAttribute('data-seq');
+            ACS.el('btnOne').click();
+          });
+        });
+
+        return page;
+      }, '查询完成（RecordCount / LatestSequence 见下）');
+    });
+
+    ACS.el('btnOne').addEventListener('click', function () {
+      var seq = ACS.el('sequence').value.trim();
+      if (!seq) { ACS.msg('msg3', 'warn', '请填序号'); return; }
+      ACS.run('msg3', async function () {
+        ACS.showJson('oneJson', await ACS.api('/api/acs/alarms/events/' + encodeURIComponent(seq)));
+      }, '已获取序号 ' + seq);
+    });
+
+    ACS.el('btnClear').addEventListener('click', function () {
+      if (!confirm('确认清空内存中的报警事件缓冲？')) return;
+      ACS.run('msg3', async function () {
+        ACS.showJson('oneJson', await ACS.api('/api/acs/alarms/events', { method: 'DELETE' }));
+      }, '缓冲已清空');
+    });
+
+    ACS.el('btnListenAdd').addEventListener('click', function () {
+      ACS.run('msg4', async function () {
+        ACS.showJson('listenJson', await ACS.api('/api/acs/alarms/listeners', {
+          method: 'POST',
+          query: { ip: ACS.el('listenIp').value.trim(), port: ACS.el('listenPort').value.trim() }
+        }));
+      }, '监听已创建');
+    });
+
+    ACS.el('btnListenDel').addEventListener('click', function () {
+      var handle = ACS.el('listenHandle').value.trim();
+      if (!handle) { ACS.msg('msg4', 'warn', '请填监听句柄'); return; }
+      ACS.run('msg4', async function () {
+        ACS.showJson('listenJson', await ACS.api('/api/acs/alarms/listeners/' + encodeURIComponent(handle), { method: 'DELETE' }));
+      }, '监听已关闭');
+    });
+
+    ACS.el('btnStatus').click();
+    ACS.el('btnEvents').click();
+  </script>
+</body>
+
+</html>

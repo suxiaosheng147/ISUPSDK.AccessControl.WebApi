@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>图片存储 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>存储状态 <code>GET /api/acs/storage</code></h2>
+      <div class="row">
+        <button class="primary" id="btnStatus">刷新状态</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="summary" class="row" style="margin-top:10px;gap:10px"></div>
+      <pre class="json" id="statusJson" style="margin-top:10px">（存储状态）</pre>
+    </div>
+
+    <div class="card">
+      <h2>文件列表 <code>GET /api/acs/storage/files</code></h2>
+      <p class="hint">门禁服务只支持 limit，因此只有 pageSize（按写入时间倒序取最新 N 个）。</p>
+      <div class="row">
+        <label class="field"><span>条数</span><input id="pageSize" type="number" value="50" min="1" max="500"></label>
+        <button class="primary" id="btnFiles">查询</button>
+      </div>
+      <div id="msg2" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2>下载 / 删除 <code>files/content?path=</code></h2>
+      <div class="row">
+        <label class="field" style="flex:1"><span class="req">相对路径</span><input id="path" placeholder="选中表格行自动填入，也可手工输入"></label>
+        <button class="primary" id="btnDownload">下载</button>
+        <button class="danger" id="btnDelete">删除</button>
+      </div>
+      <div id="msg3" class="msg hidden"></div>
+      <pre class="json" id="opResult" style="margin-top:12px">（操作结果）</pre>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '图片存储', active: 'storage.html' });
+
+    function formatBytes(bytes) {
+      if (!bytes && bytes !== 0) return '';
+      var units = ['B', 'KB', 'MB', 'GB'];
+      var i = 0;
+      var value = bytes;
+      while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+      return (i === 0 ? value : value.toFixed(2)) + ' ' + units[i];
+    }
+
+    function tag(ok, text) {
+      return '<span class="tag ' + (ok ? 'ok' : 'err') + '">' + ACS.esc(text) + '</span>';
+    }
+
+    ACS.el('btnStatus').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/storage');
+        ACS.showJson('statusJson', data);
+        ACS.el('summary').innerHTML = [
+          tag(data && data.initialized, 'SS ' + (data && data.initialized ? '已启动' : '未启动')),
+          tag(data && data.pictureRootExists, '根目录' + (data && data.pictureRootExists ? '存在' : '不存在')),
+          '<span class="tag acs">文件 ' + ((data && data.fileCount) || 0) + ' 个</span>',
+          '<span class="tag acs">占用 ' + formatBytes((data && data.totalBytes) || 0) + '</span>',
+          '<span class="tag">最近写入 ' + ACS.esc(ACS.fmtTime(data && data.lastWriteAt) || '-') + '</span>'
+        ].join('');
+      }, '已刷新存储状态');
+    });
+
+    ACS.el('btnFiles').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var data = await ACS.api('/api/acs/storage/files', { query: { pageSize: ACS.el('pageSize').value.trim() || 50 } });
+
+        var page = data || {};
+        var rows = page.pageData || [];
+        ACS.el('path').value = '';
+
+        ACS.table('table', [
+          { text: '相对路径', cls: 'wrap', render: function (r) { return ACS.esc(r.relativePath); } },
+          { text: '文件名', render: function (r) { return ACS.esc(r.fileName); } },
+          { text: '大小', render: function (r) { return formatBytes(r.length); } },
+          { text: '修改时间', render: function (r) { return ACS.fmtTime(r.lastWriteTime); } },
+          { text: '操作', cls: 'op', render: function (r) {
+              return '<button data-path="' + ACS.esc(r.relativePath) + '">选中</button>';
+            } }
+        ], rows, '没有文件（RecordCount=' + (page.recordCount || 0) + '）');
+
+        document.querySelectorAll('#table button[data-path]').forEach(function (button) {
+          button.addEventListener('click', function () { ACS.el('path').value = button.getAttribute('data-path'); });
+        });
+
+        return page;
+      }, '查询完成（根目录见下）');
+    });
+
+    ACS.el('btnDownload').addEventListener('click', function () {
+      var path = ACS.el('path').value.trim();
+      if (!path) { ACS.msg('msg3', 'warn', '请填相对路径'); return; }
+      ACS.run('msg3', async function () {
+        var name = path.split('/').pop();
+        await ACS.download('/api/acs/storage/files/content', { path: path }, name);
+      }, '已触发下载');
+    });
+
+    ACS.el('btnDelete').addEventListener('click', function () {
+      var path = ACS.el('path').value.trim();
+      if (!path) { ACS.msg('msg3', 'warn', '请填相对路径'); return; }
+      if (!confirm('确认删除文件 ' + path + '？')) return;
+      ACS.run('msg3', async function () {
+        ACS.showJson('opResult', await ACS.api('/api/acs/storage/files', { method: 'DELETE', query: { path: path } }));
+      }, '已删除');
+    });
+
+    ACS.el('btnStatus').click();
+    ACS.el('btnFiles').click();
+  </script>
+</body>
+
+</html>

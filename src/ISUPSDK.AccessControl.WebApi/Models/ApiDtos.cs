@@ -81,6 +81,12 @@ public sealed class IsapiOperationResult
     /// <summary>实际发送给设备的请求体。</summary>
     public string? RequestBody { get; set; }
 
+    /// <summary>
+    /// 本次实际使用的通道：<c>Http</c>（<c>NET_ECMS_ISAPIPassThrough</c>）/
+    /// <c>Ptxml</c>（<c>NET_ECMS_Get/Put/Post/DeletePTXMLConfig</c>）。
+    /// </summary>
+    public string Channel { get; set; } = string.Empty;
+
     /// <summary>SDK 调用是否成功。</summary>
     public bool SdkSuccess { get; set; }
 
@@ -108,6 +114,7 @@ public sealed class IsapiOperationResult
         DeviceId = device.DeviceId,
         RequestUrl = request.RequestUrl,
         RequestBody = request.Body,
+        Channel = result.Channel,
         SdkSuccess = result.SdkSuccess,
         SdkErrorCode = result.SdkErrorCode,
         SdkErrorText = result.SdkErrorText,
@@ -142,9 +149,26 @@ public sealed class IsapiQueryResult<T>
     /// <summary>查询状态字符串：OK / MORE / NO MATCH。</summary>
     public string? ResponseStatusString { get; set; }
 
+    /// <summary>本次实际返回的条数。</summary>
     public int NumOfMatches { get; set; }
 
+    /// <summary>设备侧符合条件的总条数（分页时用它判断是否还有下一页）。</summary>
     public int TotalMatches { get; set; }
+
+    /// <summary>本次查询的起始位置（<c>searchResultPosition</c>）。</summary>
+    public int SearchResultPosition { get; set; }
+
+    /// <summary>
+    /// 下一页的起始位置：把它填进下一次请求的 <c>searchResultPosition</c>（并复用 <see cref="SearchId"/>）
+    /// 即可取到下一页；<c>null</c> 表示没有更多数据。
+    /// </summary>
+    public int? NextPosition { get; set; }
+
+    /// <summary>
+    /// 本次查询会话 ID（<c>searchID</c>）。<b>翻页请求必须复用同一个值</b>，
+    /// 否则设备会当成新查询、从头发结果。
+    /// </summary>
+    public string? SearchId { get; set; }
 }
 
 /// <summary>人脸图片下发请求（multipart）。</summary>

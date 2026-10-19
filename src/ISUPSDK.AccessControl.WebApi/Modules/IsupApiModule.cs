@@ -1,6 +1,7 @@
 ﻿using ISUPSDK.AccessControl.WebApi.Endpoints;
 using ISUPSDK.AccessControl.WebApi.Middleware;
 using ISUPSDK.AccessControl.WebApi.Options;
+using ISUPSDK.AccessControl.WebApi.Services.ConfigSeed;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi.Models;
 using System.Text.Json;
@@ -37,6 +38,9 @@ public static class IsupApiModule
         });
 
         AddSwagger(builder);
+
+        // 配置种子数据生成器：把控制器 API 清单导出成 RemoteServiceConfig / ApiUrlConfig 的 INSERT 脚本。
+        builder.Services.AddScoped<ConfigSeedSqlGenerator>();
 
         return builder;
     }

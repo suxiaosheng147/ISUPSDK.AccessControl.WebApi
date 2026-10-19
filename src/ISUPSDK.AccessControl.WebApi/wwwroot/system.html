@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>服务状态 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>门禁服务运行状态 <code>GET /api/acs/system</code></h2>
+      <div class="row">
+        <button class="primary" id="btnLoad">刷新</button>
+        <button id="btnDevSdk">设备/SDK 状态 <code>GET /api/acs/devices/sdk</code></button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="summary" class="row" style="margin-top:12px;gap:10px"></div>
+      <div class="split" style="margin-top:12px">
+        <div>
+          <h3>结构化字段</h3>
+          <div id="kvTable"></div>
+        </div>
+        <div>
+          <h3>原始响应</h3>
+          <pre class="json" id="detail">（点刷新）</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>设备 SDK 状态 <code>GET /api/acs/devices/sdk</code></h2>
+      <pre class="json" id="devSdk">（点上方按钮）</pre>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '服务状态', active: 'system.html' });
+
+    function tag(ok, text) {
+      return '<span class="tag ' + (ok ? 'ok' : 'err') + '">' + ACS.esc(text) + '</span>';
+    }
+
+    ACS.el('btnLoad').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/system');
+        ACS.showJson('detail', data);
+
+        ACS.el('summary').innerHTML = [
+          tag(data && data.sdkInitialized, 'SDK ' + (data && data.sdkInitialized ? '已初始化' : '未初始化')),
+          tag(data && data.autoStartListen, '自动监听 ' + (data && data.autoStartListen ? '开' : '关')),
+          '<span class="tag acs">在线设备 ' + ((data && data.onlineDeviceCount) || 0) + '</span>',
+          '<span class="tag acs">同步中 ' + ((data && data.syncingDeviceCount) || 0) + '</span>',
+          '<span class="tag acs">报警计数 ' + ((data && data.alarmCount) || 0) + '</span>'
+        ].join('');
+
+        ACS.table('kvTable', [
+          { text: '字段', key: 'k' },
+          { text: '值', cls: 'wrap', render: function (r) { return ACS.esc(r.v); } }
+        ], [
+          { k: 'NativeDirectory', v: data.nativeDirectory },
+          { k: 'ListenHandle', v: data.listenHandle },
+          { k: 'SettingsServerAddress', v: data.settingsServerAddress },
+          { k: 'SettingsInitPort', v: data.settingsInitPort },
+          { k: 'LastAlarmAt', v: ACS.fmtTime(data.lastAlarmAt) },
+          { k: 'ServerTime', v: ACS.fmtTime(data.serverTime) }
+        ]);
+      }, '已读取服务状态');
+    });
+
+    ACS.el('btnDevSdk').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        ACS.showJson('devSdk', await ACS.api('/api/acs/devices/sdk'));
+      }, '已读取设备 SDK 状态（见下方）');
+    });
+
+    ACS.el('btnLoad').click();
+  </script>
+</body>
+
+</html>

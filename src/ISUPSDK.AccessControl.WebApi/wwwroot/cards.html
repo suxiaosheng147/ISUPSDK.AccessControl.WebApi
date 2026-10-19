@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>卡片 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>卡片列表 <code>GET /api/acs/cards</code>（分页：pageSize / pageIndex）</h2>
+      <div class="row">
+        <label class="field"><span class="req">设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <label class="field"><span>卡号（逗号分隔）</span><input id="cardNos" placeholder="00112233"></label>
+        <label class="field"><span>工号（逗号分隔）</span><input id="employeeNos" placeholder="1001"></label>
+        <label class="field"><span>每页</span><input id="pageSize" type="number" value="10" min="1" max="100"></label>
+        <label class="field"><span>页码</span><input id="pageIndex" type="number" value="1" min="1"></label>
+        <button class="primary" id="btnQuery">查询</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+      <div class="pager" id="pager"></div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <h2>卡片增改（异步任务）</h2>
+        <div class="row">
+          <label class="field"><span>卡号（路由参数）</span><input id="routeCardNo" placeholder="00112233"></label>
+        </div>
+        <div class="row">
+          <label class="field" style="flex:1"><span class="req">卡片信息 JSON（ISAPI CardInfo）</span>
+            <textarea id="cardBody" style="width:100%">{
+  "cardNo": "00112233",
+  "employeeNo": "1001",
+  "cardType": "normal"
+}</textarea>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field"><span>超时(ms)</span><input id="timeoutMs" placeholder="15000"></label>
+        </div>
+        <div class="btnrow">
+          <button class="primary" id="btnAdd">新增 POST /cards</button>
+          <button id="btnPatch">修改 PATCH /cards/{cardNo}</button>
+          <button id="btnDel">删除 DELETE /cards/{cardNo}</button>
+          <button id="btnDelByEmp">按工号删 DELETE /cards/employees/{employeeNo}</button>
+        </div>
+        <div id="msg2" class="msg hidden"></div>
+        <pre class="json" id="opResult" style="margin-top:12px">（操作结果）</pre>
+      </div>
+
+      <div class="card">
+        <h2>批量 / 清空 / 单查</h2>
+        <div class="row">
+          <label class="field" style="flex:1"><span>批量卡片 JSON</span>
+            <textarea id="batchBody">{ "Cards": [], "Update": false, "TimeoutMs": 15000 }</textarea>
+          </label>
+        </div>
+        <div class="btnrow">
+          <button id="btnBatchAdd">批量新增 POST /cards/batch</button>
+          <button id="btnBatchUpdate">批量修改 PATCH /cards/batch</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="field"><span>批量删除卡号（逗号分隔）</span><input id="deleteNos" placeholder="00112233,00112244"></label>
+          <button class="danger" id="btnDelBatch">批量删除 DELETE /cards?cardNos=</button>
+        </div>
+        <div class="btnrow" style="margin-top:10px">
+          <button id="btnSingle">单查 GET /cards/{cardNo}</button>
+          <button class="danger" id="btnDelAll">清空 DELETE /cards/all</button>
+        </div>
+        <div id="msg3" class="msg hidden"></div>
+        <pre class="json" id="batchResult" style="margin-top:12px">（操作结果）</pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '卡片', active: 'cards.html' });
+
+    var state = { pageSize: 10, pageIndex: 1, recordCount: 0, pageCount: 1 };
+
+    function deviceId() { return ACS.el('deviceId').value.trim(); }
+    function parseNumbers(text) {
+      return (text || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+
+    async function query(pageIndex) {
+      state.pageSize = Number(ACS.el('pageSize').value) || 10;
+      state.pageIndex = Math.max(1, pageIndex || Number(ACS.el('pageIndex').value) || 1);
+      ACS.el('pageIndex').value = state.pageIndex;
+
+      await ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/cards', {
+          query: {
+            deviceId: deviceId(),
+            cardNos: parseNumbers(ACS.el('cardNos').value),
+            employeeNos: parseNumbers(ACS.el('employeeNos').value),
+            pageSize: state.pageSize,
+            pageIndex: state.pageIndex
+          }
+        });
+
+        var page = data || {};
+        state.recordCount = page.recordCount || 0;
+        state.pageCount = page.pageCount || 1;
+
+        var raw = page.pageData || {};
+        var search = (raw.data && (raw.data.cardInfoSearch || raw.data.CardInfoSearch)) || {};
+        var cards = search.CardInfo || search.cardInfo || [];
+
+        ACS.table('table', [
+          { text: '卡号', render: function (r) { return ACS.esc(r.cardNo || r.CardNo); } },
+          { text: '工号', render: function (r) { return ACS.esc(r.employeeNo || r.EmployeeNo); } },
+          { text: '姓名', render: function (r) { return ACS.esc(r.name || r.Name || ''); } },
+          { text: '类型', render: function (r) { return '<span class="tag">' + ACS.esc(r.cardType || r.CardType || '') + '</span>'; } },
+          { text: '门号', render: function (r) { return ACS.esc(r.doorNo || r.DoorNo || ''); } },
+          { text: '有效期', render: function (r) {
+              var v = r.Valid || r.valid || {};
+              return ACS.esc((v.beginTime || '') + ' ~ ' + (v.endTime || ''));
+            } }
+        ], cards, '该页没有卡片（totalMatches=' + state.recordCount + '）');
+
+        ACS.pager('pager', state.pageSize, state.pageIndex, state.recordCount, state.pageCount, function (next) {
+          query(next);
+        });
+
+        return page;
+      }, '查询完成：RecordCount=' + state.recordCount);
+    }
+
+    ACS.el('btnQuery').addEventListener('click', function () { query(1); });
+
+    function opts(extra) {
+      return Object.assign({
+        query: { deviceId: deviceId(), timeoutMs: ACS.el('timeoutMs').value.trim() }
+      }, extra || {});
+    }
+
+    ACS.el('btnAdd').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        ACS.showJson('opResult', await ACS.api('/api/acs/cards', opts({ method: 'POST', body: ACS.parseJson(ACS.el('cardBody').value, '卡片 JSON') })));
+      }, '已提交新增');
+    });
+
+    ACS.el('btnPatch').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var no = ACS.el('routeCardNo').value.trim();
+        ACS.showJson('opResult', await ACS.api('/api/acs/cards/' + encodeURIComponent(no), opts({ method: 'PATCH', body: ACS.parseJson(ACS.el('cardBody').value, '卡片 JSON') })));
+      }, '已提交修改');
+    });
+
+    ACS.el('btnDel').addEventListener('click', function () {
+      var no = ACS.el('routeCardNo').value.trim();
+      if (!no) { ACS.msg('msg2', 'warn', '请填卡号'); return; }
+      if (!confirm('确认删除卡片 ' + no + '？')) return;
+      ACS.run('msg2', async function () {
+        ACS.showJson('opResult', await ACS.api('/api/acs/cards/' + encodeURIComponent(no), opts({ method: 'DELETE' })));
+      }, '已提交删除');
+    });
+
+    ACS.el('btnDelByEmp').addEventListener('click', function () {
+      var no = ACS.el('routeCardNo').value.trim();
+      if (!no) { ACS.msg('msg2', 'warn', '请在“卡号（路由参数）”里填工号'); return; }
+      ACS.run('msg2', async function () {
+        ACS.showJson('opResult', await ACS.api('/api/acs/cards/employees/' + encodeURIComponent(no), opts({ method: 'DELETE' })));
+      }, '已提交按工号删除');
+    });
+
+    ACS.el('btnBatchAdd').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        var body = ACS.parseJson(ACS.el('batchBody').value, '批量 JSON');
+        body.Update = false;
+        ACS.showJson('batchResult', await ACS.api('/api/acs/cards/batch', { method: 'POST', query: { deviceId: deviceId() }, body: body }));
+      }, '已提交批量新增');
+    });
+
+    ACS.el('btnBatchUpdate').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        var body = ACS.parseJson(ACS.el('batchBody').value, '批量 JSON');
+        body.Update = true;
+        ACS.showJson('batchResult', await ACS.api('/api/acs/cards/batch', { method: 'PATCH', query: { deviceId: deviceId() }, body: body }));
+      }, '已提交批量修改');
+    });
+
+    ACS.el('btnDelBatch').addEventListener('click', function () {
+      var nos = parseNumbers(ACS.el('deleteNos').value);
+      if (!nos.length) { ACS.msg('msg3', 'warn', '请填要删除的卡号'); return; }
+      if (!confirm('确认删除 ' + nos.length + ' 张卡片？')) return;
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/cards', { method: 'DELETE', query: { deviceId: deviceId(), cardNos: nos } }));
+      }, '已提交批量删除');
+    });
+
+    ACS.el('btnSingle').addEventListener('click', function () {
+      var no = ACS.el('routeCardNo').value.trim();
+      if (!no) { ACS.msg('msg3', 'warn', '请填卡号'); return; }
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/cards/' + encodeURIComponent(no), { query: { deviceId: deviceId() } }));
+      }, '已查询单个卡片');
+    });
+
+    ACS.el('btnDelAll').addEventListener('click', function () {
+      if (!confirm('确认清空设备上的全部卡片？此操作不可撤销。')) return;
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/cards/all', { method: 'DELETE', query: { deviceId: deviceId() } }));
+      }, '已提交清空');
+    });
+
+    query(1);
+  </script>
+</body>
+
+</html>

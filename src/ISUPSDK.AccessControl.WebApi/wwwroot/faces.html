@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>人脸 / 人脸库 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>人脸列表 <code>GET /api/acs/faces</code>（分页：pageSize / pageIndex）</h2>
+      <div class="row">
+        <label class="field"><span class="req">设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <label class="field"><span>人脸图片 ID</span><input id="fpId" placeholder="通常为工号"></label>
+        <label class="field"><span>姓名</span><input id="name" placeholder="前缀匹配"></label>
+        <label class="field"><span>人脸库 ID</span><input id="fdId" value="1"></label>
+        <label class="field"><span>库类型</span><input id="faceLibType" value="blackFD"></label>
+        <label class="field"><span>每页</span><input id="pageSize" type="number" value="10" min="1" max="100"></label>
+        <label class="field"><span>页码</span><input id="pageIndex" type="number" value="1" min="1"></label>
+        <button class="primary" id="btnQuery">查询</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+      <div class="pager" id="pager"></div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <h2>① 上传人脸图片（multipart）<code>POST /api/acs/faces</code></h2>
+        <div class="row">
+          <label class="field"><span class="req">图片文件</span><input type="file" id="faceFile" accept="image/jpeg,image/png"></label>
+          <label class="field"><span class="req">fpId（通常工号）</span><input id="upFpId"></label>
+        </div>
+        <div class="row">
+          <label class="field"><span>fdId</span><input id="upFdId" value="1"></label>
+          <label class="field"><span>faceLibType</span><input id="upFaceLibType" value="blackFD"></label>
+          <label class="field"><span>姓名</span><input id="upName"></label>
+          <label class="field"><span>工号</span><input id="upEmployeeNo"></label>
+          <label class="check"><input type="checkbox" id="upOverWrite" checked> 覆盖已有</label>
+        </div>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="primary" id="btnUpload">上传</button>
+        </div>
+        <div id="msg2" class="msg hidden"></div>
+        <pre class="json" id="uploadResult" style="margin-top:12px">（上传结果）</pre>
+      </div>
+
+      <div class="card">
+        <h2>② 按 Base64 / URL 下发 <code>POST /api/acs/faces/encoded</code></h2>
+        <div class="row">
+          <label class="field" style="flex:1"><span class="req">请求 JSON</span>
+            <textarea id="encodedBody" style="width:100%">{
+  "fpId": "1001",
+  "fdId": "1",
+  "faceLibType": "blackFD",
+  "name": "张三",
+  "employeeNo": "1001",
+  "overWrite": true,
+  "imageBase64": "",
+  "imageUrl": ""
+}</textarea>
+          </label>
+        </div>
+        <div class="btnrow">
+          <button class="primary" id="btnEncoded">下发 encoded</button>
+          <button id="btnRemote">下发 remote（按 URL 下载）</button>
+          <button id="btnBatch">批量下发 batch</button>
+        </div>
+        <div id="msg3" class="msg hidden"></div>
+        <pre class="json" id="encodedResult" style="margin-top:12px">（下发结果）</pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>删除人脸 <code>DELETE /api/acs/faces/{fpId}</code></h2>
+      <div class="row">
+        <label class="field"><span class="req">fpId</span><input id="delFpId" placeholder="通常为工号"></label>
+        <label class="field"><span>fdId</span><input id="delFdId" value="1"></label>
+        <label class="field"><span>faceLibType</span><input id="delFaceLibType" value="blackFD"></label>
+        <label class="field"><span>超时(ms)</span><input id="delTimeoutMs" placeholder="15000"></label>
+        <button class="danger" id="btnDelete">删除</button>
+      </div>
+      <div id="msg4" class="msg hidden"></div>
+    </div>
+
+    <div class="card">
+      <h2>人脸库 <code>/api/acs/face-libraries</code></h2>
+      <div class="row">
+        <button class="primary" id="btnLibList">列表 GET</button>
+        <label class="field"><span>库 ID（PUT/DELETE 用）</span><input id="libFdId" value="1"></label>
+        <button id="btnLibCreate">新建 POST</button>
+        <button id="btnLibUpdate">修改 PUT /{fdId}</button>
+        <button class="danger" id="btnLibDelete">删除 DELETE /{fdId}</button>
+      </div>
+      <div class="row">
+        <label class="field" style="flex:1"><span>人脸库 JSON（ISAPI FDLib）</span>
+          <textarea id="libBody" style="width:100%">{ "FDID": "1", "name": "黑名单库", "faceLibType": "blackFD", "capacity": 100000 }</textarea>
+        </label>
+      </div>
+      <div id="msg5" class="msg hidden"></div>
+      <pre class="json" id="libResult" style="margin-top:12px">（人脸库操作结果）</pre>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '人脸 / 人脸库', active: 'faces.html' });
+
+    var state = { pageSize: 10, pageIndex: 1, recordCount: 0, pageCount: 1 };
+
+    function deviceId() { return ACS.el('deviceId').value.trim(); }
+
+    async function query(pageIndex) {
+      state.pageSize = Number(ACS.el('pageSize').value) || 10;
+      state.pageIndex = Math.max(1, pageIndex || Number(ACS.el('pageIndex').value) || 1);
+      ACS.el('pageIndex').value = state.pageIndex;
+
+      await ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/faces', {
+          query: {
+            deviceId: deviceId(),
+            fpId: ACS.el('fpId').value.trim(),
+            name: ACS.el('name').value.trim(),
+            fdId: ACS.el('fdId').value.trim() || '1',
+            faceLibType: ACS.el('faceLibType').value.trim() || 'blackFD',
+            pageSize: state.pageSize,
+            pageIndex: state.pageIndex
+          }
+        });
+
+        var page = data || {};
+        state.recordCount = page.recordCount || 0;
+        state.pageCount = page.pageCount || 1;
+
+        var raw = page.pageData || {};
+        var search = (raw.data && (raw.data.faceInfoSearch || raw.data.FaceInfoSearch || raw.data.MatchList)) || [];
+        var list = search.MatchList || search.faceInfo || search.MatchList || [];
+
+        ACS.table('table', [
+          { text: 'fpId', render: function (r) { return ACS.esc(r.fpId || r.FPID || r.faceLibId || ''); } },
+          { text: '姓名', render: function (r) { return ACS.esc(r.name || r.Name || ''); } },
+          { text: '库 ID', render: function (r) { return ACS.esc(r.fdId || r.FDID || ''); } },
+          { text: '库类型', render: function (r) { return ACS.esc(r.faceLibType || r.FaceLibType || ''); } },
+          { text: '原始', cls: 'wrap', render: function (r) { return '<code>' + ACS.esc(JSON.stringify(r).slice(0, 200)) + '</code>'; } }
+        ], Array.isArray(list) ? list : [], '该页没有人脸（totalMatches=' + state.recordCount + '）');
+
+        ACS.pager('pager', state.pageSize, state.pageIndex, state.recordCount, state.pageCount, function (next) {
+          query(next);
+        });
+      }, '查询完成：RecordCount=' + state.recordCount);
+    }
+
+    ACS.el('btnQuery').addEventListener('click', function () { query(1); });
+
+    // ① multipart 上传
+    ACS.el('btnUpload').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var file = ACS.el('faceFile').files[0];
+        if (!file) throw new Error('请选择人脸图片文件');
+        var fpId = ACS.el('upFpId').value.trim();
+        if (!fpId) throw new Error('请填写 fpId（通常为工号）');
+
+        var form = new FormData();
+        form.append('image', file, file.name);
+        form.append('fpId', fpId);
+        form.append('fdId', ACS.el('upFdId').value.trim() || '1');
+        form.append('faceLibType', ACS.el('upFaceLibType').value.trim() || 'blackFD');
+        form.append('overWrite', ACS.el('upOverWrite').checked ? 'true' : 'false');
+        if (ACS.el('upName').value.trim()) form.append('name', ACS.el('upName').value.trim());
+        if (ACS.el('upEmployeeNo').value.trim()) form.append('employeeNo', ACS.el('upEmployeeNo').value.trim());
+
+        ACS.showJson('uploadResult', await ACS.api('/api/acs/faces', {
+          method: 'POST',
+          query: { deviceId: deviceId() },
+          formData: form
+        }));
+      }, '上传完成（结果见下方）');
+    });
+
+    // ② encoded / remote / batch
+    function encodedOptions(method, path) {
+      return {
+        method: method,
+        query: { deviceId: deviceId() },
+        body: ACS.parseJson(ACS.el('encodedBody').value, '请求 JSON')
+      };
+    }
+
+    ACS.el('btnEncoded').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('encodedResult', await ACS.api('/api/acs/faces/encoded', encodedOptions('POST', '/encoded')));
+      }, 'encoded 下发完成');
+    });
+
+    ACS.el('btnRemote').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('encodedResult', await ACS.api('/api/acs/faces/remote', encodedOptions('POST', '/remote')));
+      }, 'remote 下发完成');
+    });
+
+    ACS.el('btnBatch').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        var body = ACS.parseJson(ACS.el('encodedBody').value, '请求 JSON');
+        ACS.showJson('encodedResult', await ACS.api('/api/acs/faces/batch', {
+          method: 'POST',
+          query: { deviceId: deviceId() },
+          body: Array.isArray(body) ? body : [body]
+        }));
+      }, '批量下发完成');
+    });
+
+    // 删除人脸
+    ACS.el('btnDelete').addEventListener('click', function () {
+      var fpId = ACS.el('delFpId').value.trim();
+      if (!fpId) { ACS.msg('msg4', 'warn', '请填 fpId'); return; }
+      if (!confirm('确认删除人脸 ' + fpId + '？')) return;
+      ACS.run('msg4', async function () {
+        await ACS.api('/api/acs/faces/' + encodeURIComponent(fpId), {
+          method: 'DELETE',
+          query: {
+            deviceId: deviceId(),
+            fdId: ACS.el('delFdId').value.trim() || '1',
+            faceLibType: ACS.el('delFaceLibType').value.trim() || 'blackFD',
+            timeoutMs: ACS.el('delTimeoutMs').value.trim()
+          }
+        });
+      }, '已删除人脸 ' + fpId);
+    });
+
+    // 人脸库
+    ACS.el('btnLibList').addEventListener('click', function () {
+      ACS.run('msg5', async function () {
+        ACS.showJson('libResult', await ACS.api('/api/acs/face-libraries', { query: { deviceId: deviceId() } }));
+      }, '已读取人脸库列表');
+    });
+
+    ACS.el('btnLibCreate').addEventListener('click', function () {
+      ACS.run('msg5', async function () {
+        ACS.showJson('libResult', await ACS.api('/api/acs/face-libraries', {
+          method: 'POST',
+          query: { deviceId: deviceId() },
+          body: ACS.parseJson(ACS.el('libBody').value, '人脸库 JSON')
+        }));
+      }, '人脸库已创建');
+    });
+
+    ACS.el('btnLibUpdate').addEventListener('click', function () {
+      var fdId = ACS.el('libFdId').value.trim();
+      if (!fdId) { ACS.msg('msg5', 'warn', '请填库 ID'); return; }
+      ACS.run('msg5', async function () {
+        ACS.showJson('libResult', await ACS.api('/api/acs/face-libraries/' + encodeURIComponent(fdId), {
+          method: 'PUT',
+          query: { deviceId: deviceId() },
+          body: ACS.parseJson(ACS.el('libBody').value, '人脸库 JSON')
+        }));
+      }, '人脸库已修改');
+    });
+
+    ACS.el('btnLibDelete').addEventListener('click', function () {
+      var fdId = ACS.el('libFdId').value.trim();
+      if (!fdId) { ACS.msg('msg5', 'warn', '请填库 ID'); return; }
+      if (!confirm('确认删除人脸库 ' + fdId + '？')) return;
+      ACS.run('msg5', async function () {
+        ACS.showJson('libResult', await ACS.api('/api/acs/face-libraries/' + encodeURIComponent(fdId), {
+          method: 'DELETE',
+          query: { deviceId: deviceId() }
+        }));
+      }, '人脸库已删除');
+    });
+
+    query(1);
+  </script>
+</body>
+
+</html>

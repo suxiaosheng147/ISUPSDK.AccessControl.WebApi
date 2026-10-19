@@ -145,7 +145,15 @@ public sealed class AccessControlDoorsController : AccessControlControllerBase
         CancellationToken ct = default)
     {
         var device = ResolveDevice(deviceId, userId);
-        var result = await AccessControl.SearchEventsAsync(device, request.ToCondition(), request.TimeoutMs, ct);
+        var result = await AccessControl.SearchEventsAsync(
+            device,
+            request.ToCondition(),
+            request.SearchResultPosition,
+            request.MaxResults,
+            request.ResolveSearchId(),
+            request.TimeoutMs,
+            ct);
+
         return FromQuery(result);
     }
 

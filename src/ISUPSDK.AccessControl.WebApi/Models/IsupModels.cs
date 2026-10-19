@@ -85,6 +85,13 @@ public sealed record IsapiRawMessage
 /// <summary>ISAPI 透传结果。</summary>
 public sealed class IsapiResult
 {
+    /// <summary>
+    /// 本次实际使用的通道：<c>Http</c>（<c>NET_ECMS_ISAPIPassThrough</c>）/
+    /// <c>Ptxml</c>（<c>NET_ECMS_Get/Put/Post/DeletePTXMLConfig</c>），按设备编号由
+    /// <c>ISUP:IsapiChannel</c> 决定。
+    /// </summary>
+    public string Channel { get; set; } = string.Empty;
+
     /// <summary>SDK 调用是否成功（<c>NET_ECMS_*PTXMLConfig</c> 返回值）。</summary>
     public bool SdkSuccess { get; set; }
 

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>人员 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>人员列表 <code>GET /api/acs/persons</code>（分页：pageSize / pageIndex）</h2>
+      <div class="row">
+        <label class="field"><span class="req">设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <label class="field"><span>工号（逗号分隔）</span><input id="employeeNos" placeholder="1001,1002"></label>
+        <label class="field"><span>姓名</span><input id="name" placeholder="前缀匹配"></label>
+        <label class="field"><span>人员类型</span>
+          <select id="userType">
+            <option value="">（全部）</option>
+            <option value="normal">normal</option>
+            <option value="visitor">visitor</option>
+            <option value="blackList">blackList</option>
+          </select>
+        </label>
+        <label class="field"><span>每页</span><input id="pageSize" type="number" value="10" min="1" max="100"></label>
+        <label class="field"><span>页码</span><input id="pageIndex" type="number" value="1" min="1"></label>
+        <button class="primary" id="btnQuery">查询</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+      <div class="pager" id="pager"></div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <h2>人员增改（异步任务，返回 202 + 任务信息）</h2>
+        <div class="row">
+          <label class="field"><span>工号（路由参数，PUT/PATCH 用）</span><input id="routeEmployeeNo" placeholder="1001"></label>
+        </div>
+        <div class="row">
+          <label class="field" style="flex:1"><span class="req">人员信息 JSON（ISAPI UserInfo）</span>
+            <textarea id="userBody" style="width:100%">{
+  "employeeNo": "1001",
+  "name": "张三",
+  "userType": "normal",
+  "doorRight": "1",
+  "Valid": { "enable": true, "beginTime": "2024-01-01T00:00:00", "endTime": "2034-01-01T00:00:00" },
+  "RightPlan": [ { "planTemplateNo": "1" } ]
+}</textarea>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field"><span>超时(ms)</span><input id="timeoutMs" placeholder="15000"></label>
+        </div>
+        <div class="btnrow">
+          <button class="primary" id="btnAdd">新增 POST /persons</button>
+          <button id="btnPatch">修改 PATCH /persons/{employeeNo}</button>
+          <button id="btnPut">覆盖 PUT /persons/{employeeNo}</button>
+          <button id="btnDel">删除 DELETE /persons/{employeeNo}</button>
+        </div>
+        <div id="msg2" class="msg hidden"></div>
+        <pre class="json" id="opResult" style="margin-top:12px">（操作结果）</pre>
+      </div>
+
+      <div class="card">
+        <h2>批量 / 清空 / 统计</h2>
+        <div class="row">
+          <label class="field" style="flex:1"><span>批量人员 JSON</span>
+            <textarea id="batchBody">{ "Users": [], "Update": false, "TimeoutMs": 15000 }</textarea>
+          </label>
+        </div>
+        <div class="btnrow">
+          <button id="btnBatchAdd">批量新增 POST /persons/batch</button>
+          <button id="btnBatchUpdate">批量修改 PATCH /persons/batch</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="field"><span>批量删除工号（逗号分隔）</span><input id="deleteNos" placeholder="1001,1002"></label>
+          <button class="danger" id="btnDelBatch">批量删除 DELETE /persons?employeeNos=</button>
+        </div>
+        <div class="btnrow" style="margin-top:10px">
+          <button id="btnCount">数量 GET /persons/count</button>
+          <button id="btnCap">能力集 GET /persons/capabilities</button>
+          <button id="btnSingle">单查 GET /persons/{employeeNo}</button>
+          <button class="danger" id="btnDelAll">清空 DELETE /persons/all</button>
+        </div>
+        <div id="msg3" class="msg hidden"></div>
+        <pre class="json" id="batchResult" style="margin-top:12px">（操作结果）</pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '人员', active: 'persons.html' });
+
+    var state = { pageSize: 10, pageIndex: 1, recordCount: 0, pageCount: 1 };
+
+    function deviceId() { return ACS.el('deviceId').value.trim(); }
+    function parseNumbers(text) {
+      return (text || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+
+    async function query(pageIndex) {
+      state.pageSize = Number(ACS.el('pageSize').value) || 10;
+      state.pageIndex = Math.max(1, pageIndex || Number(ACS.el('pageIndex').value) || 1);
+      ACS.el('pageIndex').value = state.pageIndex;
+
+      await ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/persons', {
+          query: {
+            deviceId: deviceId(),
+            employeeNos: parseNumbers(ACS.el('employeeNos').value),
+            name: ACS.el('name').value.trim(),
+            userType: ACS.el('userType').value,
+            pageSize: state.pageSize,
+            pageIndex: state.pageIndex
+          }
+        });
+
+        var page = data || {};
+        state.recordCount = page.recordCount || 0;
+        state.pageCount = page.pageCount || 1;
+
+        // 设备返回的 IsapiQueryResult：data.data.userInfoSearch.UserInfo
+        var raw = page.pageData || {};
+        var search = (raw.data && (raw.data.userInfoSearch || raw.data.UserInfoSearch)) || {};
+        var users = search.UserInfo || search.userInfo || [];
+
+        ACS.table('table', [
+          { text: '工号', render: function (r) { return ACS.esc(r.employeeNo || r.EmployeeNo); } },
+          { text: '姓名', render: function (r) { return ACS.esc(r.name || r.Name); } },
+          { text: '类型', render: function (r) { return '<span class="tag">' + ACS.esc(r.userType || r.UserType || '') + '</span>'; } },
+          { text: '门权限', render: function (r) { return ACS.esc(r.doorRight || r.DoorRight || ''); } },
+          { text: '有效期', render: function (r) {
+              var v = r.Valid || r.valid || {};
+              return ACS.esc((v.beginTime || '') + ' ~ ' + (v.endTime || ''));
+            } },
+          { text: '计划', render: function (r) {
+              var plans = r.RightPlan || r.rightPlan || [];
+              return plans.map(function (p) { return ACS.esc(p.planTemplateNo || p.PlanTemplateNo); }).join(', ');
+            } }
+        ], users, '该页没有人员（totalMatches=' + state.recordCount + '）');
+
+        ACS.pager('pager', state.pageSize, state.pageIndex, state.recordCount, state.pageCount, function (next) {
+          query(next);
+        });
+
+        return page;
+      }, '查询完成：RecordCount=' + state.recordCount + '，PageCount=' + state.pageCount);
+    }
+
+    ACS.el('btnQuery').addEventListener('click', function () { query(1); });
+
+    function opOptions(extra) {
+      return Object.assign({
+        query: { deviceId: deviceId(), timeoutMs: ACS.el('timeoutMs').value.trim() }
+      }, extra || {});
+    }
+
+    ACS.el('btnAdd').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var body = ACS.parseJson(ACS.el('userBody').value, '人员 JSON');
+        ACS.showJson('opResult', await ACS.api('/api/acs/persons', opOptions({ method: 'POST', body: body })));
+      }, '已提交新增（异步任务，用「下发任务」页查结果）');
+    });
+
+    ACS.el('btnPatch').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var body = ACS.parseJson(ACS.el('userBody').value, '人员 JSON');
+        var no = ACS.el('routeEmployeeNo').value.trim();
+        ACS.showJson('opResult', await ACS.api('/api/acs/persons/' + encodeURIComponent(no), opOptions({ method: 'PATCH', body: body })));
+      }, '已提交修改');
+    });
+
+    ACS.el('btnPut').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        var body = ACS.parseJson(ACS.el('userBody').value, '人员 JSON');
+        var no = ACS.el('routeEmployeeNo').value.trim();
+        ACS.showJson('opResult', await ACS.api('/api/acs/persons/' + encodeURIComponent(no), opOptions({ method: 'PUT', body: body })));
+      }, '已提交整体覆盖');
+    });
+
+    ACS.el('btnDel').addEventListener('click', function () {
+      var no = ACS.el('routeEmployeeNo').value.trim();
+      if (!no) { ACS.msg('msg2', 'warn', '请填工号'); return; }
+      if (!confirm('确认删除人员 ' + no + '？')) return;
+      ACS.run('msg2', async function () {
+        ACS.showJson('opResult', await ACS.api('/api/acs/persons/' + encodeURIComponent(no), opOptions({ method: 'DELETE' })));
+      }, '已提交删除');
+    });
+
+    ACS.el('btnBatchAdd').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        var body = ACS.parseJson(ACS.el('batchBody').value, '批量 JSON');
+        body.Update = false;
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons/batch', { method: 'POST', query: { deviceId: deviceId() }, body: body }));
+      }, '已提交批量新增');
+    });
+
+    ACS.el('btnBatchUpdate').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        var body = ACS.parseJson(ACS.el('batchBody').value, '批量 JSON');
+        body.Update = true;
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons/batch', { method: 'PATCH', query: { deviceId: deviceId() }, body: body }));
+      }, '已提交批量修改');
+    });
+
+    ACS.el('btnDelBatch').addEventListener('click', function () {
+      var nos = parseNumbers(ACS.el('deleteNos').value);
+      if (!nos.length) { ACS.msg('msg3', 'warn', '请填要删除的工号'); return; }
+      if (!confirm('确认删除 ' + nos.length + ' 个人员？')) return;
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons', {
+          method: 'DELETE',
+          query: { deviceId: deviceId(), employeeNos: nos }
+        }));
+      }, '已提交批量删除');
+    });
+
+    ACS.el('btnCount').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons/count', { query: { deviceId: deviceId() } }));
+      }, '已读取人员数量');
+    });
+
+    ACS.el('btnCap').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons/capabilities', { query: { deviceId: deviceId() } }));
+      }, '已读取能力集');
+    });
+
+    ACS.el('btnSingle').addEventListener('click', function () {
+      var no = ACS.el('routeEmployeeNo').value.trim();
+      if (!no) { ACS.msg('msg3', 'warn', '请填工号'); return; }
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons/' + encodeURIComponent(no), { query: { deviceId: deviceId() } }));
+      }, '已查询单个人员');
+    });
+
+    ACS.el('btnDelAll').addEventListener('click', function () {
+      if (!confirm('确认清空设备上的全部人员？此操作不可撤销。')) return;
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/persons/all', { method: 'DELETE', query: { deviceId: deviceId() } }));
+      }, '已提交清空');
+    });
+
+    query(1);
+  </script>
+</body>
+
+</html>

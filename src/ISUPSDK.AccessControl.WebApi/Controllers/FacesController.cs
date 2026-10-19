@@ -216,7 +216,19 @@ public sealed class FacesController : AccessControlControllerBase
         return AcceptedTask(task);
     }
 
-    /// <summary>查询人脸图片信息。</summary>
+    /// <summary>
+    /// 查询人脸图片信息（<c>POST /ISAPI/Intelligent/FDLib/FDSearch?format=json</c>）。
+    /// <para>
+    /// <b>该接口是分页的</b>：设备一次只返回 <c>numOfMatches</c> 条（可能远少于库里的人脸数），
+    /// <c>totalMatches</c> 才是符合条件的总数。翻页方式：
+    /// 取响应里的 <c>nextPosition</c> 填回请求体的 <c>searchResultPosition</c>，
+    /// <b>并复用同一个 <c>searchId</c></b>，直到 <c>nextPosition</c> 为 null。
+    /// </para>
+    /// <para>
+    /// 例：首次请求 <c>{ "maxResults": 30 }</c> 返回 3 条 + <c>totalMatches=25</c>，
+    /// 则下一页请求 <c>{ "searchResultPosition": 3, "searchId": "上一次返回的 searchId" }</c>。
+    /// </para>
+    /// </summary>
     [HttpPost("search")]
     public async Task<IActionResult> SearchAsync(
         [FromBody] FaceSearchRequest? request = null,

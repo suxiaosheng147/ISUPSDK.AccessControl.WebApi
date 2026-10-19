@@ -14,11 +14,17 @@ public sealed class UserSearchRequest
     /// <summary>按人员类型筛选：normal / visitor / blackList。</summary>
     public string? UserType { get; set; }
 
-    /// <summary>起始位置（分页）。</summary>
+    /// <summary>起始位置（分页）。翻页时填上一次响应里的 <c>nextPosition</c>。</summary>
     public int SearchResultPosition { get; set; }
 
     /// <summary>单次返回条数（建议 ≤30）。</summary>
     public int MaxResults { get; set; } = 30;
+
+    /// <summary>
+    /// 查询会话 ID（<c>searchID</c>）。翻页时必须复用上一次响应里的 <c>searchId</c>，
+    /// 否则设备会当成新查询、从头发结果；留空则自动生成。
+    /// </summary>
+    public string? SearchId { get; set; }
 
     /// <summary>透传接收超时（毫秒）。</summary>
     public uint TimeoutMs { get; set; } = 15000;
@@ -28,7 +34,7 @@ public sealed class UserSearchRequest
 
     public IsapiUserInfoSearchCond ToCondition() => new()
     {
-        SearchId = Guid.NewGuid().ToString("N"),
+        SearchId = string.IsNullOrWhiteSpace(SearchId) ? Guid.NewGuid().ToString("N") : SearchId!,
         SearchResultPosition = SearchResultPosition,
         MaxResults = MaxResults,
         Name = Name,
@@ -46,9 +52,16 @@ public sealed class CardSearchRequest
 
     public List<string>? EmployeeNos { get; set; }
 
+    /// <summary>起始位置（分页）。翻页时填上一次响应里的 <c>nextPosition</c>。</summary>
     public int SearchResultPosition { get; set; }
 
     public int MaxResults { get; set; } = 30;
+
+    /// <summary>
+    /// 查询会话 ID（<c>searchID</c>）。翻页时必须复用上一次响应里的 <c>searchId</c>，
+    /// 否则设备会当成新查询、从头发结果；留空则自动生成。
+    /// </summary>
+    public string? SearchId { get; set; }
 
     public uint TimeoutMs { get; set; } = 15000;
 
@@ -56,7 +69,7 @@ public sealed class CardSearchRequest
 
     public IsapiCardInfoSearchCond ToCondition() => new()
     {
-        SearchId = Guid.NewGuid().ToString("N"),
+        SearchId = string.IsNullOrWhiteSpace(SearchId) ? Guid.NewGuid().ToString("N") : SearchId!,
         SearchResultPosition = SearchResultPosition,
         MaxResults = MaxResults,
         CardNoList = CardNos is { Count: > 0 }
@@ -81,15 +94,26 @@ public sealed class FaceSearchRequest
     /// <summary>姓名（可选）。</summary>
     public string? Name { get; set; }
 
+    /// <summary>
+    /// 查询起始位置（<c>searchResultPosition</c>，设备侧从 0 开始）。
+    /// 翻页时填上一次响应里的 <c>nextPosition</c>。
+    /// </summary>
     public int SearchResultPosition { get; set; }
 
+    /// <summary>本次最多返回多少条（<c>maxResults</c>）。</summary>
     public int MaxResults { get; set; } = 30;
+
+    /// <summary>
+    /// 查询会话 ID（<c>searchID</c>，1~32 位）。
+    /// 翻页时必须复用上一次响应里的 <c>searchId</c>，否则设备会当成新查询、从头发结果；留空则自动生成。
+    /// </summary>
+    public string? SearchId { get; set; }
 
     public uint TimeoutMs { get; set; } = 15000;
 
     public IsapiFaceSearchCond ToCondition() => new()
     {
-        SearchId = Guid.NewGuid().ToString("N"),
+        SearchId = string.IsNullOrWhiteSpace(SearchId) ? Guid.NewGuid().ToString("N") : SearchId!,
         SearchResultPosition = SearchResultPosition,
         MaxResults = MaxResults,
         FaceLibType = FaceLibType,
@@ -259,12 +283,22 @@ public sealed class AcsEventSearchRequest
 
     public int MaxResults { get; set; } = 30;
 
+    /// <summary>
+    /// 查询会话 ID（<c>searchID</c>）。翻页时必须复用上一次响应里的 <c>searchId</c>，
+    /// 否则设备会当成新查询、从头发结果；留空则自动生成。
+    /// </summary>
+    public string? SearchId { get; set; }
+
     public uint TimeoutMs { get; set; } = 30000;
+
+    /// <summary>取本次查询使用的 <c>searchID</c>（未指定则生成并记住，便于翻页复用）。</summary>
+    public string ResolveSearchId()
+        => string.IsNullOrWhiteSpace(SearchId) ? SearchId = Guid.NewGuid().ToString("N") : SearchId!;
 
     // 设备要求 major/minor 为标量（传数组会返回 badParameters）；0 表示全部。
     public object ToCondition() => new
     {
-        searchID = Guid.NewGuid().ToString("N"),
+        searchID = ResolveSearchId(),
         searchResultPosition = SearchResultPosition,
         maxResults = MaxResults,
         major = Major is { Count: > 0 } ? Major[0] : 0,

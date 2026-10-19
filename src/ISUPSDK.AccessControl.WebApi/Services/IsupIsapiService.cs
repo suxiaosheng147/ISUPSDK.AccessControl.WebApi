@@ -90,20 +90,38 @@ public sealed class IsupIsapiService
         return last ?? throw new IsupApiException("人员列表为空。");
     }
 
-    /// <summary>查询人员。</summary>
-    public Task<IsapiQueryResult<IsapiUserInfoSearchResponse>> SearchUsersAsync(
+    /// <summary>
+    /// 查询人员（单页）。分页信息见返回的 <c>searchResultPosition</c> / <c>numOfMatches</c> /
+    /// <c>totalMatches</c> / <c>nextPosition</c> / <c>searchId</c>。
+    /// </summary>
+    public async Task<IsapiQueryResult<IsapiUserInfoSearchResponse>> SearchUsersAsync(
         IsupDevice device,
         IsapiUserInfoSearchCond condition,
         uint timeoutMs = 15000,
         CancellationToken ct = default)
-        => SendQueryAsync<IsapiUserInfoSearchResponse>(
+    {
+        var result = await SendQueryAsync<IsapiUserInfoSearchResponse>(
             device,
             IsapiEndpoints.UserInfoSearch,
             JsonQuery,
             "UserInfoSearchCond",
             condition,
             timeoutMs,
-            ct);
+            ct).ConfigureAwait(false);
+
+        // 分页字段在 UserInfoSearch 内层节点，顶层的通用提取取不到，这里按强类型结果回填。
+        var search = result.Data?.UserInfoSearch;
+        var returned = search?.UserInfo?.Count ?? search?.NumOfMatches ?? result.NumOfMatches;
+
+        return WithPaging(
+            result,
+            condition.SearchResultPosition,
+            returned,
+            search?.TotalMatches ?? result.TotalMatches,
+            search?.ResponseStatusStrg ?? result.ResponseStatusString,
+            condition.SearchId,
+            condition.MaxResults);
+    }
 
     /// <summary>
     /// 统计人员数量（GET /ISAPI/AccessControl/UserInfo/Count?format=json）。
@@ -250,20 +268,38 @@ public sealed class IsupIsapiService
         return last ?? throw new IsupApiException("卡片列表为空。");
     }
 
-    /// <summary>查询卡片。</summary>
-    public Task<IsapiQueryResult<IsapiCardInfoSearchResponse>> SearchCardsAsync(
+    /// <summary>
+    /// 查询卡片（单页）。分页信息见返回的 <c>searchResultPosition</c> / <c>numOfMatches</c> /
+    /// <c>totalMatches</c> / <c>nextPosition</c> / <c>searchId</c>。
+    /// </summary>
+    public async Task<IsapiQueryResult<IsapiCardInfoSearchResponse>> SearchCardsAsync(
         IsupDevice device,
         IsapiCardInfoSearchCond condition,
         uint timeoutMs = 15000,
         CancellationToken ct = default)
-        => SendQueryAsync<IsapiCardInfoSearchResponse>(
+    {
+        var result = await SendQueryAsync<IsapiCardInfoSearchResponse>(
             device,
             IsapiEndpoints.CardInfoSearch,
             JsonQuery,
             "CardInfoSearchCond",
             condition,
             timeoutMs,
-            ct);
+            ct).ConfigureAwait(false);
+
+        // 分页字段在 CardInfoSearch 内层节点，顶层的通用提取取不到，这里按强类型结果回填。
+        var search = result.Data?.CardInfoSearch;
+        var returned = search?.CardInfo?.Count ?? search?.NumOfMatches ?? result.NumOfMatches;
+
+        return WithPaging(
+            result,
+            condition.SearchResultPosition,
+            returned,
+            search?.TotalMatches ?? result.TotalMatches,
+            search?.ResponseStatusStrg ?? result.ResponseStatusString,
+            condition.SearchId,
+            condition.MaxResults);
+    }
 
     // ==========================================================================================
     // 人脸下发
@@ -377,7 +413,6 @@ public sealed class IsupIsapiService
         uint timeoutMs = 15000,
         CancellationToken ct = default)
     {
-        var wrapped = IsapiBodyBuilder.WrapCondition("FaceSearchCond", condition);
         var request = new IsapiRawMessage
         {
             RequestUrl = IsapiEndpoints.Post($"{IsapiEndpoints.FaceSearch}?{JsonQuery}"),
@@ -389,9 +424,16 @@ public sealed class IsupIsapiService
         LogResult(device, request.RequestUrl, result);
 
         var json = IsapiMultipartResponse.ExtractJson(result.ResponseText) ?? result.ResponseText;
-        var data = IsupJson.Deserialize<IsapiFaceSearchResponse>(json);
 
-        return new IsapiQueryResult<IsapiFaceSearchResponse>
+        // FDSearch 即使带 format=json 也可能回 multipart（每张人脸一个 JSON 分段），
+        // 逐段解析后合并 MatchList —— 只取第一段会少数据。
+        var data = MergeFaceSearchSegments(result.ResponseText, out var matchCount);
+
+        var returned = matchCount > 0 ? matchCount : data?.NumOfMatches ?? ExtractInt(json, "numOfMatches");
+        var totalMatches = data?.TotalMatches is > 0 ? data.TotalMatches.Value : ExtractInt(json, "totalMatches");
+        var statusStrg = data?.ResponseStatusStrg ?? ExtractResponseStatusString(json);
+
+        var query = new IsapiQueryResult<IsapiFaceSearchResponse>
         {
             UserId = device.UserId,
             DeviceId = device.DeviceId,
@@ -401,10 +443,96 @@ public sealed class IsupIsapiService
             Data = data,
             RawResponse = result.ResponseText,
             ElapsedMs = result.ElapsedMs,
-            ResponseStatusString = data?.ResponseStatusStrg ?? ExtractResponseStatusString(json),
-            NumOfMatches = data?.NumOfMatches ?? ExtractInt(json, "numOfMatches"),
-            TotalMatches = data?.TotalMatches ?? ExtractInt(json, "totalMatches"),
         };
+
+        return WithPaging(
+            query,
+            condition.SearchResultPosition,
+            returned,
+            totalMatches,
+            statusStrg,
+            condition.SearchId,
+            condition.MaxResults);
+    }
+
+    /// <summary>
+    /// 解析 FDSearch 响应并合并所有人脸条目。
+    /// <para>
+    /// 响应可能是纯 JSON，也可能是 multipart（每张人脸一个 JSON 分段）；
+    /// 非 JSON 分段（图片）解析失败后跳过，MatchList 按 FPID 去重合并。
+    /// </para>
+    /// </summary>
+    /// <param name="responseText">设备原始响应。</param>
+    /// <param name="matchCount">合并后实际拿到的人脸条数。</param>
+    private static IsapiFaceSearchResponse? MergeFaceSearchSegments(string? responseText, out int matchCount)
+    {
+        matchCount = 0;
+
+        IsapiFaceSearchResponse? merged = null;
+        List<MatchListItem>? matches = null;
+        HashSet<string>? seen = null;
+
+        foreach (var segment in IsapiMultipartResponse.ExtractAllJson(responseText))
+        {
+            var page = IsupJson.Deserialize<IsapiFaceSearchResponse>(segment);
+            if (page is null)
+            {
+                // 图片等非 JSON 分段解析不出来，跳过。
+                continue;
+            }
+
+            if (merged is null)
+            {
+                merged = page;
+            }
+            else
+            {
+                merged.NumOfMatches = Math.Max(merged.NumOfMatches ?? 0, page.NumOfMatches ?? 0);
+                merged.TotalMatches = Math.Max(merged.TotalMatches ?? 0, page.TotalMatches ?? 0);
+                merged.ResponseStatusStrg ??= page.ResponseStatusStrg;
+                merged.StatusCode ??= page.StatusCode;
+                merged.SubStatusCode ??= page.SubStatusCode;
+                merged.StatusString ??= page.StatusString;
+            }
+
+            if (page.MatchList is not { Count: > 0 })
+            {
+                continue;
+            }
+
+            matches ??= new List<MatchListItem>();
+            seen ??= new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var item in page.MatchList)
+            {
+                if (seen.Add(FaceMatchKey(item)))
+                {
+                    matches.Add(item);
+                }
+            }
+        }
+
+        if (merged is not null && matches is not null)
+        {
+            merged.MatchList = matches;
+            matchCount = matches.Count;
+        }
+
+        return merged;
+    }
+
+    /// <summary>MatchList 条目的去重键：优先 <c>FPID</c>（人脸图片 ID），否则用整条 JSON 文本。</summary>
+    private static string FaceMatchKey(MatchListItem item)
+    {
+        foreach (var pair in item)
+        {
+            if (string.Equals(pair.Key, "FPID", StringComparison.OrdinalIgnoreCase) && pair.Value is not null)
+            {
+                return "FPID:" + pair.Value;
+            }
+        }
+
+        return IsupJson.Serialize(item);
     }
 
     /// <summary>查询人脸库列表（GET /ISAPI/Intelligent/FDLib）。</summary>
@@ -693,7 +821,7 @@ public sealed class IsupIsapiService
             json,
             new SingleOrArrayConverter<TMatch>());
 
-        return new IsapiQueryResult<IsapiUserRightSearchResponse<TMatch>>
+        var query = new IsapiQueryResult<IsapiUserRightSearchResponse<TMatch>>
         {
             UserId = device.UserId,
             DeviceId = device.DeviceId,
@@ -703,10 +831,17 @@ public sealed class IsupIsapiService
             Data = data,
             RawResponse = result.ResponseText,
             ElapsedMs = result.ElapsedMs,
-            ResponseStatusString = data?.ResponseStatus,
-            NumOfMatches = data?.NumOfMatches ?? 0,
-            TotalMatches = data?.TotalMatches ?? 0,
         };
+
+        // 人员权限类查询的 searchResultPosition 从 1 开始，nextPosition 同样按「位置 + 本页条数」推进。
+        return WithPaging(
+            query,
+            condition.SearchResultPosition,
+            data?.MatchResults?.Count ?? data?.NumOfMatches ?? 0,
+            data?.TotalMatches ?? 0,
+            data?.ResponseStatus,
+            condition.SearchId,
+            condition.MaxResults);
     }
 
     /// <summary>分页拉取某个 Search 端点的全部结果（复用同一个 searchID，position 从 1 开始）。</summary>
@@ -831,21 +966,51 @@ public sealed class IsupIsapiService
         return SendRawAsync(device, raw, ct);
     }
 
-    /// <summary>门禁事件查询（POST /ISAPI/AccessControl/AcsEvent）。</summary>
+    /// <summary>
+    /// 门禁事件查询（POST /ISAPI/AccessControl/AcsEvent），单页。
+    /// 分页参数未知时（例如对账内部调用）只做解析，不填 nextPosition。
+    /// </summary>
     public Task<IsapiQueryResult<Dictionary<string, object?>>> SearchEventsAsync(
         IsupDevice device,
         object condition,
         uint timeoutMs = 30000,
         CancellationToken ct = default)
+        => SearchEventsAsync(device, condition, position: 0, pageSize: 0, searchId: null, timeoutMs, ct);
+
+    /// <summary>
+    /// 门禁事件查询（单页）。分页信息见返回的 <c>searchResultPosition</c> / <c>numOfMatches</c> /
+    /// <c>totalMatches</c> / <c>nextPosition</c> / <c>searchId</c>。
+    /// </summary>
+    public async Task<IsapiQueryResult<Dictionary<string, object?>>> SearchEventsAsync(
+        IsupDevice device,
+        object condition,
+        int position,
+        int pageSize,
+        string? searchId,
+        uint timeoutMs = 30000,
+        CancellationToken ct = default)
     {
-        return SendQueryAsync<Dictionary<string, object?>>(
+        var result = await SendQueryAsync<Dictionary<string, object?>>(
             device,
             IsapiEndpoints.AcsEvent,
             JsonAndTimeoutQuery,
             "AcsEventCond",
             condition,
             timeoutMs,
-            ct);
+            ct).ConfigureAwait(false);
+
+        // numOfMatches / totalMatches / responseStatusStrg 在 AcsEvent 内层节点。
+        var (numOfMatches, totalMatches, responseStatus) = ExtractNestedPaging(result.Data, "AcsEvent");
+        var returned = numOfMatches > 0 ? numOfMatches : result.NumOfMatches;
+
+        return WithPaging(
+            result,
+            position,
+            returned,
+            totalMatches > 0 ? totalMatches : result.TotalMatches,
+            responseStatus ?? result.ResponseStatusString,
+            searchId,
+            pageSize);
     }
 
     /// <summary>
@@ -1054,6 +1219,84 @@ public sealed class IsupIsapiService
             NumOfMatches = matches,
             TotalMatches = total,
         };
+    }
+
+    /// <summary>
+    /// 统一填充分页信息（<c>searchResultPosition</c> / <c>numOfMatches</c> / <c>totalMatches</c> /
+    /// <c>nextPosition</c> / <c>searchId</c>）。所有设备侧分页查询接口共用同一套规则：
+    /// <c>nextPosition</c> 为 <c>null</c> 表示没有下一页；翻页时把它填回 <c>searchResultPosition</c>
+    /// 并复用同一个 <c>searchId</c>。
+    /// </summary>
+    /// <param name="result">待填充的查询结果。</param>
+    /// <param name="position">本次请求的起始位置。</param>
+    /// <param name="returned">本次实际返回的条数。</param>
+    /// <param name="totalMatches">设备侧符合条件的总数（未知填 0）。</param>
+    /// <param name="responseStatus">设备返回的 <c>responseStatusStrg</c> / <c>responseStatus</c>。</param>
+    /// <param name="searchId">本次查询会话 ID（翻页需原样复用）。</param>
+    /// <param name="pageSize">本次请求的 <c>maxResults</c>（设备不给总数时用于推断是否还有下一页）。</param>
+    private static IsapiQueryResult<T> WithPaging<T>(
+        IsapiQueryResult<T> result,
+        int position,
+        int returned,
+        int totalMatches,
+        string? responseStatus,
+        string? searchId,
+        int pageSize = 0)
+    {
+        result.SearchResultPosition = position < 0 ? 0 : position;
+        result.NumOfMatches = returned;
+        result.TotalMatches = totalMatches;
+        result.ResponseStatusString = responseStatus;
+        result.SearchId = searchId;
+        result.NextPosition = HasMore(result.SearchResultPosition, returned, totalMatches, responseStatus, pageSize)
+            ? result.SearchResultPosition + returned
+            : null;
+
+        return result;
+    }
+
+    /// <summary>
+    /// 判断是否还有下一页：设备明确回 <c>MORE</c> 就信它；否则按「起始位置 + 本次条数 &lt; 总数」判断；
+    /// 设备连总数都没给时退化为「本页是否装满 maxResults」。
+    /// </summary>
+    private static bool HasMore(int position, int returned, int totalMatches, string? responseStatus, int pageSize)
+        => returned > 0 &&
+           (string.Equals(responseStatus, "MORE", StringComparison.OrdinalIgnoreCase) ||
+            (totalMatches > 0
+                ? position + returned < totalMatches
+                : pageSize > 0 && returned >= pageSize));
+
+    /// <summary>
+    /// 从响应字典的指定根节点（例如 <c>AcsEvent</c>）里取分页字段。
+    /// 设备把 <c>numOfMatches</c> / <c>totalMatches</c> / <c>responseStatusStrg</c> 放在内层节点，
+    /// 顶层的通用提取取不到。
+    /// </summary>
+    private static (int numOfMatches, int totalMatches, string? responseStatus) ExtractNestedPaging(
+        Dictionary<string, object?>? data,
+        string rootName)
+    {
+        if (data is null)
+        {
+            return (0, 0, null);
+        }
+
+        foreach (var pair in data)
+        {
+            if (!string.Equals(pair.Key, rootName, StringComparison.OrdinalIgnoreCase) ||
+                pair.Value is not System.Text.Json.JsonElement root ||
+                root.ValueKind != System.Text.Json.JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var numOfMatches = root.TryGetProperty("numOfMatches", out var num) && num.TryGetInt32(out var n) ? n : 0;
+            var totalMatches = root.TryGetProperty("totalMatches", out var total) && total.TryGetInt32(out var t) ? t : 0;
+            var responseStatus = root.TryGetProperty("responseStatusStrg", out var status) ? status.GetString() : null;
+
+            return (numOfMatches, totalMatches, responseStatus);
+        }
+
+        return (0, 0, null);
     }
 
     private static string NormalizeRequestLine(string requestUrl)

@@ -182,21 +182,23 @@ public sealed class CardsController : AccessControlControllerBase
         request ??= new CardSearchRequest();
         var device = ResolveDevice(deviceId, userId);
 
+        var condition = request.ToCondition();
+
         if (!request.FetchAll)
         {
-            var single = await AccessControl.SearchCardsAsync(device, request.ToCondition(), request.TimeoutMs, ct);
+            var single = await AccessControl.SearchCardsAsync(device, condition, request.TimeoutMs, ct);
             return FromQuery(single);
         }
 
         var all = new List<IsapiCardInfo>();
-        var condition = request.ToCondition();
+        var start = request.SearchResultPosition;
         var total = 0;
         IsapiQueryResult<IsapiCardInfoSearchResponse>? last = null;
 
         for (var page = 0; page < 20; page++)
         {
-            condition.SearchId = Guid.NewGuid().ToString("N");
-            condition.SearchResultPosition = request.SearchResultPosition + all.Count;
+            // 整轮聚合复用同一个 searchID（换了 searchID 设备会当成新查询、从头发结果）。
+            condition.SearchResultPosition = start + all.Count;
             condition.MaxResults = request.MaxResults;
 
             last = await AccessControl.SearchCardsAsync(device, condition, request.TimeoutMs, ct);
@@ -226,6 +228,8 @@ public sealed class CardsController : AccessControlControllerBase
             ResponseStatusString = last?.ResponseStatusString,
             NumOfMatches = all.Count,
             TotalMatches = total,
+            SearchResultPosition = start,
+            SearchId = condition.SearchId,
         };
 
         return Ok(ApiResponse<IsapiQueryResult<List<IsapiCardInfo>>>.Ok(aggregated));

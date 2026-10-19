@@ -11,7 +11,8 @@ var builder = WebApplication.CreateBuilder(args);
 // 设备接入模块：ISUP SDK 配置、运行时、后台初始化（CMS 监听 / 报警 / 图片存储 / 定时任务）。
 builder.AddIsupSdk();
 
-// 门禁业务模块：设备访问层（PTXML 透传）、ISAPI 业务服务、异步下发任务队列。
+// 门禁业务模块：设备访问层（ISAPI 通道：http-sdk / http-IsapiDigest / http-http / http-xml）、
+// ISAPI 业务服务、异步下发任务队列。
 builder.AddIsupAccessControl();
 
 // Web 宿主模块：CORS、MVC/JSON、Swagger、统一异常处理。

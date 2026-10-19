@@ -12,11 +12,16 @@ using Microsoft.Extensions.Options;
 namespace ISUPSDK.AccessControl.WebApi.Services;
 
 /// <summary>
-/// 设备注册表 + ISAPI 透传服务（ISUP CMS 底座）。
+/// 设备注册表 + ISAPI 通道服务（ISUP CMS 底座）。
 /// <para>
-/// 设备表来自 <see cref="IsupSdkRuntime"/> 的 CMS 注册监听（注册句柄 → 设备序列号）；
-/// 透传通过 ISUP CMS 的 PTXML 接口（<c>NET_ECMS_Get/Put/Post/DeletePTXMLConfig</c>）完成，
-/// 与 OTAP 侧的 <c>OTAP_CMS_ISAPIPassThrough</c> 等价。
+/// 设备表来自 <see cref="IsupSdkRuntime"/> 的 CMS 注册监听（注册句柄 → 设备序列号）。
+/// 报文发往设备支持四条通道，请求路径与报文体完全相同，按设备编号由 <c>ISUP:IsapiChannel</c> 选择：
+/// <list type="bullet">
+/// <item><c>http-sdk</c>：SDK 转发 HTTP 请求 —— <c>NET_ECMS_ISAPIPassThrough</c>（请求行带方法）—— 默认；</item>
+/// <item><c>http-IsapiDigest</c> / <c>http-http</c>：平台 Digest 直连设备（<see cref="IsapiDigestClient"/>）；</item>
+/// <item><c>http-xml</c>：透传 —— <c>NET_ECMS_Get/Put/Post/DeletePTXMLConfig</c>（按方法选接口），
+/// 与 OTAP 侧的 <c>OTAP_CMS_ISAPIPassThrough</c> 等价。</item>
+/// </list>
 /// </para>
 /// </summary>
 public sealed class IsupCmsService
@@ -35,14 +40,32 @@ public sealed class IsupCmsService
     private readonly IsupSdkRuntime _runtime;
     private readonly ILogger<IsupCmsService> _logger;
     private readonly Options.IsupSdkOptions _options;
+    private readonly Options.IsapiChannelOptions _channelOptions;
+    private readonly IsapiDigestClient _digest;
     // 键 = 设备号（重连不新增条目）。
     private readonly ConcurrentDictionary<string, DeviceRecord> _records = new(StringComparer.OrdinalIgnoreCase);
 
-    public IsupCmsService(IsupSdkRuntime runtime, IOptions<Options.IsupSdkOptions> options, ILogger<IsupCmsService> logger)
+    public IsupCmsService(
+        IsupSdkRuntime runtime,
+        IOptions<Options.IsupSdkOptions> options,
+        IOptions<Options.IsapiChannelOptions> channelOptions,
+        IsapiDigestClient digest,
+        ILogger<IsupCmsService> logger)
     {
         _runtime = runtime;
         _options = options.Value;
+        _channelOptions = channelOptions.Value;
+        _digest = digest;
         _logger = logger;
+
+        // 通道取值写错时（例如 "http-SDK" 之外的花样）给一条告警，避免静默走默认通道查不出原因。
+        var unknown = _channelOptions.EnumerateUnknownValues().ToArray();
+        if (unknown.Length > 0)
+        {
+            _logger.LogWarning(
+                "ISUP:IsapiChannel 中有无法识别的通道取值，将回退 http-sdk：{Values}。可用取值：http-sdk / http-IsapiDigest / http-http / http-xml",
+                string.Join("，", unknown));
+        }
     }
 
     /// <summary>SDK 是否已完成初始化。</summary>
@@ -160,13 +183,13 @@ public sealed class IsupCmsService
         return await SendIsapiAsync(device, request, parts, ct).ConfigureAwait(false);
     }
 
-    /// <summary>按设备对象透传（内部会采用其注册句柄）。</summary>
+    /// <summary>按设备对象透传（内部会采用其注册句柄，并按设备编号选择通道）。</summary>
     public async Task<IsapiResult> SendIsapiAsync(
         IsupDevice device,
         IsapiRawMessage request,
         IReadOnlyList<IsapiMultipartPart>? parts = null,
         CancellationToken ct = default)
-        => await Task.Run(() => SendIsapiCore(device.UserId, device, request, parts), ct).ConfigureAwait(false);
+        => await SendIsapiCoreAsync(device, request, parts, ct).ConfigureAwait(false);
 
     /// <summary>把透传结果映射为 <see cref="IsapiOperationResult"/>（供控制器统一返回）。</summary>
     public static IsapiOperationResult ToOperationResult(IsupDevice device, IsapiRawMessage request, IsapiResult result) => new()
@@ -175,6 +198,7 @@ public sealed class IsupCmsService
         DeviceId = device.DeviceId,
         RequestUrl = request.RequestUrl,
         RequestBody = request.Body,
+        Channel = result.Channel,
         SdkSuccess = result.SdkSuccess,
         SdkErrorCode = result.SdkErrorCode,
         SdkErrorText = result.SdkErrorText,
@@ -288,34 +312,66 @@ public sealed class IsupCmsService
         }
     }
 
-    private IsapiResult SendIsapiCore(int loginId, IsupDevice device, IsapiRawMessage request, IReadOnlyList<IsapiMultipartPart>? parts)
+    /// <summary>
+    /// 按设备编号选通道后把报文发给设备。
+    /// <para>
+    /// 请求路径与报文体在四条通道上完全相同，只是「谁把这条 HTTP 请求发出去」不同：
+    /// <c>http-sdk</c>（<c>NET_ECMS_ISAPIPassThrough</c>）、<c>http-IsapiDigest</c> / <c>http-http</c>
+    /// （平台 Digest 直连设备）、<c>http-xml</c>（<c>NET_ECMS_*PTXMLConfig</c>，透传）。
+    /// </para>
+    /// </summary>
+    private async Task<IsapiResult> SendIsapiCoreAsync(
+        IsupDevice device,
+        IsapiRawMessage request,
+        IReadOnlyList<IsapiMultipartPart>? parts,
+        CancellationToken ct)
+    {
+        var (method, urlPath) = SplitRequestLine(request.RequestUrl);
+
+        // 例外：multipart 请求（人脸图片上传）固定走 http-xml（PTXML 透传）——
+        // ISAPI 透传的参数结构体（NET_EHOME_PTXML_PARAM）没有分段字段，SDK 无法把 multipart 的
+        // Content-Type/boundary 一并带给设备，与原控制台 ISUPPostFace 的实现保持一致。
+        var channel = parts is { Count: > 0 }
+            ? Options.IsapiChannel.HttpXml
+            : _channelOptions.Resolve(device.DeviceId);
+
+        return channel == Options.IsapiChannel.HttpDigest
+            ? await SendViaDigestAsync(device, method, urlPath, request, ct).ConfigureAwait(false)
+            : await SendViaSdkAsync(device.UserId, channel, method, urlPath, request, parts, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>经 SDK 发报文：<c>http-sdk</c>（ISAPI 透传）或 <c>http-xml</c>（PTXML 接口）。</summary>
+    private async Task<IsapiResult> SendViaSdkAsync(
+        int loginId,
+        Options.IsapiChannel channel,
+        string method,
+        string urlPath,
+        IsapiRawMessage request,
+        IReadOnlyList<IsapiMultipartPart>? parts,
+        CancellationToken ct)
     {
         var stopwatch = Stopwatch.StartNew();
-        var result = new IsapiResult();
-        var (method, urlPath) = SplitRequestLine(request.RequestUrl);
-        byte[] body;
-        if (parts is { Count: > 0 })
-        {
-            body = BuildMultipartBody(out _, parts);
-        }
-        else
-        {
-            body = Encoding.UTF8.GetBytes(request.Body ?? string.Empty);
-        }
-
-        var succeeded = false;
+        var result = new IsapiResult { Channel = Options.IsapiChannelOptions.Describe(channel) };
+        var body = parts is { Count: > 0 }
+            ? BuildMultipartBody(out _, parts)
+            : Encoding.UTF8.GetBytes(request.Body ?? string.Empty);
 
         foreach (var bufferSize in BufferSizes)
         {
-            var (ok, text, errorCode) = InvokePassthrough(loginId, method, urlPath, body, bufferSize, request.TimeoutMs);
+            // SDK 调用是同步阻塞的，放到线程池里执行，避免占住请求线程。
+            var (ok, text, errorCode) = await Task.Run(
+                () => channel == Options.IsapiChannel.HttpSdk
+                    ? InvokeIsapiHttp(loginId, method, urlPath, body, bufferSize, request.TimeoutMs)
+                    : InvokePassthrough(loginId, method, urlPath, body, bufferSize, request.TimeoutMs),
+                ct).ConfigureAwait(false);
 
             if (ok)
             {
                 result.SdkSuccess = true;
                 result.ResponseText = text;
                 result.Status = ParseStatus(text);
-                succeeded = true;
-                break;
+                result.ElapsedMs = stopwatch.ElapsedMilliseconds;
+                return result;
             }
 
             if (errorCode == ErrorBufferTooSmall)
@@ -328,20 +384,100 @@ public sealed class IsupCmsService
             result.SdkErrorCode = (uint)errorCode;
             result.SdkErrorText = DescribeError(errorCode);
             result.ElapsedMs = stopwatch.ElapsedMilliseconds;
-            _logger.LogWarning("ISAPI 透传失败（{Method} {Url}）：{Error}", method, urlPath, result.SdkErrorText);
+            _logger.LogWarning(
+                "ISAPI {Channel} 失败（{Method} {Url}）：{Error}", result.Channel, method, urlPath, result.SdkErrorText);
             return result;
         }
 
-        if (!succeeded)
+        result.SdkSuccess = false;
+        result.SdkErrorCode = ErrorBufferTooSmall;
+        result.SdkErrorText = "ISAPI 响应超过最大缓冲区（1MB）。";
+        result.ElapsedMs = stopwatch.ElapsedMilliseconds;
+        _logger.LogWarning(
+            "ISAPI {Channel} 失败（{Method} {Url}）：{Error}", result.Channel, method, urlPath, result.SdkErrorText);
+
+        return result;
+    }
+
+    /// <summary>
+    /// 平台直连设备发报文（<c>http-IsapiDigest</c> / <c>http-http</c>）：
+    /// 走 <see cref="IsapiDigestClient"/>，设备地址与账号密码取自 <c>ISUP:IsapiDigest:Devices</c>。
+    /// <para>
+    /// 注意：这条通道的超时由 <c>ISUP:IsapiDigest:TimeoutSeconds</c> 控制，不使用
+    /// <see cref="IsapiRawMessage.TimeoutMs"/>。
+    /// </para>
+    /// </summary>
+    private async Task<IsapiResult> SendViaDigestAsync(
+        IsupDevice device,
+        string method,
+        string urlPath,
+        IsapiRawMessage request,
+        CancellationToken ct)
+    {
+        const string channelName = Options.IsapiChannelOptions.IsapiDigestValue;
+        var result = new IsapiResult { Channel = channelName };
+
+        if (!_digest.TryResolveDevice(device.DeviceId, out var target))
         {
             result.SdkSuccess = false;
-            result.SdkErrorCode = ErrorBufferTooSmall;
-            result.SdkErrorText = "ISAPI 响应超过最大缓冲区（1MB）。";
-            _logger.LogWarning("ISAPI 透传失败（{Method} {Url}）：{Error}", method, urlPath, result.SdkErrorText);
+            result.SdkErrorText =
+                $"设备 {device.DeviceId} 走 {channelName} 需要在 ISUP:IsapiDigest:Devices 里配置 IP/账号/密码。";
+            _logger.LogWarning("{Error}（{Method} {Url}）", result.SdkErrorText, method, urlPath);
+            return result;
         }
 
-        result.ElapsedMs = stopwatch.ElapsedMilliseconds;
+        if (!TryResolveHttpMethod(method, out var httpMethod))
+        {
+            result.SdkSuccess = false;
+            result.SdkErrorText = $"不支持的 HTTP 方法：{method}";
+            _logger.LogWarning("{Error}（{Method} {Url}）", result.SdkErrorText, method, urlPath);
+            return result;
+        }
+
+        var response = await _digest
+            .SendAsync(target, httpMethod, urlPath, request.Body, "application/json", ct)
+            .ConfigureAwait(false);
+
+        result.SdkSuccess = response.Success;
+        result.ResponseText = response.Text;
+        result.Status = ParseStatus(response.Text);
+        result.ElapsedMs = response.ElapsedMs;
+
+        if (response.Success)
+        {
+            return result;
+        }
+
+        // 【兼容说明】SdkErrorCode 在这条通道上存的是 HTTP 状态码（0 表示请求没发出去）。
+        result.SdkErrorCode = response.StatusCode > 0 ? (uint)response.StatusCode : 0;
+        result.SdkErrorText = $"HTTP 直连失败：{response.Error}（目标 {target.ResolveBaseUrl()}）";
+        _logger.LogWarning(
+            "ISAPI {Channel} 失败（{Method} {Url}）：{Error}", channelName, method, urlPath, result.SdkErrorText);
+
         return result;
+    }
+
+    /// <summary>把报文里的方法字符串映射为 <see cref="HttpMethod"/>（Digest 直连通道用）。</summary>
+    private static bool TryResolveHttpMethod(string method, out HttpMethod httpMethod)
+    {
+        switch (method.ToUpperInvariant())
+        {
+            case "GET":
+                httpMethod = HttpMethod.Get;
+                return true;
+            case "PUT":
+                httpMethod = HttpMethod.Put;
+                return true;
+            case "POST":
+                httpMethod = HttpMethod.Post;
+                return true;
+            case "DELETE":
+                httpMethod = HttpMethod.Delete;
+                return true;
+            default:
+                httpMethod = null!;
+                return false;
+        }
     }
 
     private static (string method, string urlPath) SplitRequestLine(string? requestUrl)
@@ -456,6 +592,86 @@ public sealed class IsupCmsService
 
             // 按 SDK 返回的长度读取，并按第一个 NUL 截断：
             // 部分固件会把 dwReturnedXMLLen 填成缓冲区大小，读满会把零填充/残留带进文本。
+            var text = length > 0
+                ? IsapiResponseNormalizer.TruncateAtNul(Marshal.PtrToStringUTF8(pOut, length) ?? string.Empty)
+                : string.Empty;
+
+            return (true, text, 0);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pUrl);
+            Marshal.FreeHGlobal(pIn);
+            Marshal.FreeHGlobal(pOut);
+            Marshal.FreeHGlobal(pCfg);
+        }
+    }
+
+    /// <summary>
+    /// 通过 SDK 的「执行 HTTP 请求」接口（<c>NET_ECMS_ISAPIPassThrough</c>）把一条 ISAPI 报文转发给设备。
+    /// <para>
+    /// 与 <see cref="InvokePassthrough"/>（PTXML：按方法选 Get/Put/Post/Delete 接口，请求行只有路径）的差别：
+    /// 这里方法写在请求行里（<c>"POST /ISAPI/AccessControl/AcsEvent?format=json"</c>），
+    /// 请求路径与报文体不变，SDK 原样当作一条 HTTP 请求发给设备。
+    /// </para>
+    /// </summary>
+    private static (bool ok, string? text, int errorCode) InvokeIsapiHttp(
+        int loginId, string method, string urlPath, byte[] body, uint bufferSize, uint timeoutMs)
+    {
+        var requestLineBytes = Encoding.UTF8.GetBytes($"{method} {urlPath}");
+
+        // 多分配 1 字节写 \0：SDK 要求 pRequestUrl / pInBuffer 以 \0 结尾
+        // （dw*Len 仍只算实际数据长度）。
+        var pUrl = Marshal.AllocHGlobal(requestLineBytes.Length + 1);
+        var pIn = Marshal.AllocHGlobal(body.Length + 1);
+        var pOut = Marshal.AllocHGlobal((int)bufferSize);
+        var pCfg = Marshal.AllocHGlobal(Marshal.SizeOf<HCISUPCMS.NET_EHOME_PTXML_PARAM>());
+
+        // 输出缓冲必须先清零：SDK 不保证在响应末尾写 NUL，缓冲区里的上一次堆内存残留
+        // 会被一起读出来（表现为"合法 JSON 后面跟 '1' / 0xEF 等垃圾"，导致解析失败）。
+        unsafe
+        {
+            new Span<byte>((void*)pOut, (int)bufferSize).Clear();
+        }
+
+        try
+        {
+            Marshal.Copy(requestLineBytes, 0, pUrl, requestLineBytes.Length);
+            Marshal.WriteByte(pUrl, requestLineBytes.Length, 0);
+
+            if (body.Length > 0)
+            {
+                Marshal.Copy(body, 0, pIn, body.Length);
+            }
+
+            Marshal.WriteByte(pIn, body.Length, 0);
+
+            var param = new HCISUPCMS.NET_EHOME_PTXML_PARAM
+            {
+                pRequestUrl = pUrl,
+                dwRequestUrlLen = (uint)requestLineBytes.Length,
+                pCondBuffer = IntPtr.Zero,
+                dwCondSize = 0,
+                pInBuffer = pIn,
+                dwInSize = (uint)body.Length,
+                pOutBuffer = pOut,
+                dwOutSize = bufferSize,
+                dwRecvTimeOut = timeoutMs == 0 ? 5000u : timeoutMs,
+                byRes = new byte[24],
+            };
+
+            Marshal.StructureToPtr(param, pCfg, false);
+
+            if (!HCISUPCMS.NET_ECMS_ISAPIPassThrough(loginId, pCfg))
+            {
+                return (false, null, HCISUPCMS.NET_ECMS_GetLastError());
+            }
+
+            var updated = Marshal.PtrToStructure<HCISUPCMS.NET_EHOME_PTXML_PARAM>(pCfg);
+            var length = updated.dwReturnedXMLLen > 0 ? (int)updated.dwReturnedXMLLen : (int)updated.dwOutSize;
+
+            // 按 SDK 返回的长度读取，并按第一个 NUL 截断：
+            // 部分固件会把返回长度填成缓冲区大小，读满会把零填充/残留带进文本。
             var text = length > 0
                 ? IsapiResponseNormalizer.TruncateAtNul(Marshal.PtrToStringUTF8(pOut, length) ?? string.Empty)
                 : string.Empty;

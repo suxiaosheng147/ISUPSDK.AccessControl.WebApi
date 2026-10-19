@@ -196,7 +196,12 @@ public sealed class PersonsController : AccessControlControllerBase
         return AcceptedTask(task);
     }
 
-    /// <summary>查询人员（支持自动翻页）。</summary>
+    /// <summary>
+    /// 查询人员（单页）。响应里带 <c>searchResultPosition</c> / <c>numOfMatches</c> /
+    /// <c>totalMatches</c> / <c>nextPosition</c> / <c>searchId</c>：
+    /// 翻页时把 <c>nextPosition</c> 填回请求的 <c>searchResultPosition</c> 并复用同一个 <c>searchId</c>。
+    /// 需要一次取全时传 <c>fetchAll=true</c>。
+    /// </summary>
     [HttpPost("search")]
     public async Task<IActionResult> SearchAsync(
         [FromBody] UserSearchRequest? request = null,
@@ -207,21 +212,23 @@ public sealed class PersonsController : AccessControlControllerBase
         request ??= new UserSearchRequest();
         var device = ResolveDevice(deviceId, userId);
 
+        var condition = request.ToCondition();
+
         if (!request.FetchAll)
         {
-            var single = await AccessControl.SearchUsersAsync(device, request.ToCondition(), request.TimeoutMs, ct);
+            var single = await AccessControl.SearchUsersAsync(device, condition, request.TimeoutMs, ct);
             return FromQuery(single);
         }
 
         var all = new List<IsapiUserInfo>();
-        var condition = request.ToCondition();
+        var start = request.SearchResultPosition;
         var total = 0;
         IsapiQueryResult<IsapiUserInfoSearchResponse>? last = null;
 
         for (var page = 0; page < 20; page++)
         {
-            condition.SearchId = Guid.NewGuid().ToString("N");
-            condition.SearchResultPosition = request.SearchResultPosition + all.Count;
+            // 整轮聚合复用同一个 searchID（换了 searchID 设备会当成新查询、从头发结果）。
+            condition.SearchResultPosition = start + all.Count;
             condition.MaxResults = request.MaxResults;
 
             last = await AccessControl.SearchUsersAsync(device, condition, request.TimeoutMs, ct);
@@ -251,6 +258,8 @@ public sealed class PersonsController : AccessControlControllerBase
             ResponseStatusString = last?.ResponseStatusString,
             NumOfMatches = all.Count,
             TotalMatches = total,
+            SearchResultPosition = start,
+            SearchId = condition.SearchId,
         };
 
         return Ok(ApiResponse<IsapiQueryResult<List<IsapiUserInfo>>>.Ok(aggregated));

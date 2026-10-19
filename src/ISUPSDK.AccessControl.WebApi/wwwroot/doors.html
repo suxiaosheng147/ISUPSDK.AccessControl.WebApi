@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>门禁控制 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>门禁控制 <code>/api/acs/doors</code></h2>
+      <div class="row">
+        <label class="field"><span class="req">设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <label class="field"><span>门序号</span><input id="doorNo" type="number" value="1" min="1"></label>
+        <label class="field"><span>超时(ms)</span><input id="timeoutMs" placeholder="15000"></label>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnCap">能力集 <code>GET /doors/capabilities</code></button>
+        <button id="btnWork">工作状态 <code>GET /doors/work-status</code></button>
+        <button id="btnStatus">门状态 <code>GET /doors/{doorNo}</code></button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <pre class="json" id="result" style="margin-top:12px">（查询结果）</pre>
+    </div>
+
+    <div class="card">
+      <h2>设置门状态 <code>PUT /api/acs/doors/{doorNo}/state</code></h2>
+      <p class="hint">开门 / 关门 / 常开 / 常闭 统一由一个接口表达，命令放在请求体的 <code>Cmd</code>（open / close / alwaysOpen / alwaysClose）。</p>
+      <div class="row">
+        <label class="field"><span>命令</span>
+          <select id="cmd">
+            <option value="open">open（开门，常开一次）</option>
+            <option value="close">close（关门）</option>
+            <option value="alwaysOpen">alwaysOpen（常开）</option>
+            <option value="alwaysClose">alwaysClose（常闭）</option>
+          </select>
+        </label>
+        <button class="primary" id="btnSetState">下发</button>
+        <button id="btnOpen">快捷开门</button>
+        <button id="btnClose">快捷关门</button>
+        <button id="btnAlwaysOpen">快捷常开</button>
+        <button id="btnAlwaysClose">快捷常闭</button>
+      </div>
+      <div id="msg2" class="msg hidden"></div>
+      <pre class="json" id="stateResult" style="margin-top:12px">（下发结果）</pre>
+    </div>
+
+    <div class="card">
+      <h2>报警输出 <code>PUT /api/acs/doors/outputs/{outputId}</code></h2>
+      <div class="row">
+        <label class="field"><span>输出口序号</span><input id="outputId" type="number" value="1" min="1"></label>
+        <label class="field"><span>命令</span>
+          <select id="outputCommand">
+            <option value="high">high</option>
+            <option value="low">low</option>
+          </select>
+        </label>
+        <button class="primary" id="btnOutput">触发输出</button>
+      </div>
+      <div id="msg3" class="msg hidden"></div>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '门禁控制', active: 'doors.html' });
+
+    function deviceId() { return ACS.el('deviceId').value.trim(); }
+    function doorNo() { return ACS.el('doorNo').value.trim() || '1'; }
+    function timeoutMs() { return ACS.el('timeoutMs').value.trim(); }
+
+    ACS.el('btnCap').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        ACS.showJson('result', await ACS.api('/api/acs/doors/capabilities', { query: { deviceId: deviceId(), timeoutMs: timeoutMs() } }));
+      }, '已读取门禁能力集');
+    });
+
+    ACS.el('btnWork').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        ACS.showJson('result', await ACS.api('/api/acs/doors/work-status', { query: { deviceId: deviceId(), timeoutMs: timeoutMs() } }));
+      }, '已读取工作状态');
+    });
+
+    ACS.el('btnStatus').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        ACS.showJson('result', await ACS.api('/api/acs/doors/' + encodeURIComponent(doorNo()), {
+          query: { deviceId: deviceId(), timeoutMs: timeoutMs() }
+        }));
+      }, '已读取门状态');
+    });
+
+    function setState(cmd) {
+      ACS.run('msg2', async function () {
+        ACS.showJson('stateResult', await ACS.api('/api/acs/doors/' + encodeURIComponent(doorNo()) + '/state', {
+          method: 'PUT',
+          query: { deviceId: deviceId() },
+          body: { Cmd: cmd, TimeoutMs: Number(timeoutMs() || 10000) }
+        }));
+      }, '已下发：' + cmd);
+    }
+
+    ACS.el('btnSetState').addEventListener('click', function () { setState(ACS.el('cmd').value); });
+    ACS.el('btnOpen').addEventListener('click', function () { setState('open'); });
+    ACS.el('btnClose').addEventListener('click', function () { setState('close'); });
+    ACS.el('btnAlwaysOpen').addEventListener('click', function () { setState('alwaysOpen'); });
+    ACS.el('btnAlwaysClose').addEventListener('click', function () { setState('alwaysClose'); });
+
+    ACS.el('btnOutput').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('result', await ACS.api('/api/acs/doors/outputs/' + encodeURIComponent(ACS.el('outputId').value.trim() || '1'), {
+          method: 'PUT',
+          query: { deviceId: deviceId(), command: ACS.el('outputCommand').value, timeoutMs: timeoutMs() }
+        }));
+      }, '已触发报警输出');
+    });
+  </script>
+</body>
+
+</html>

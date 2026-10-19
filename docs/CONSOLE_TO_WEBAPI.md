@@ -95,7 +95,7 @@ app.Run();
 | Faces | `/ISAPI/Intelligent/FDLib/*`（`FaceDataRecord` multipart 或 `FDSetUp` JSON） | 同上（推荐 faceURL 方式，与原控制台 `ISUPPostFace` 一致） |
 | PlanTemplates | `/ISAPI/AccessControl/UserRight*` | 同上（复用 `Services/Builders/PlanTemplatePresets`） |
 | AccessControlDoors | `/ISAPI/AccessControl/RemoteControl/door/*`、`/System/BaseWorkStatus` 等 | 同上 |
-| Devices | — | `IsupCmsService`（设备表来自 CMS 注册回调）+ PTXML 透传 |
+| Devices | — | `IsupCmsService`（设备表来自 CMS 注册回调）+ ISAPI 通道（默认 `http-sdk`，可按设备编号切换） |
 | Alarms | `/ISAPI/Event/notification/httpHosts` | `IsupAmsService` 订阅 `IsupSdkRuntime.AlarmReceived`（`NET_EALARM_StartListen` 回调） |
 | Storage | — | `IsupSsService` 管理 `Settings:PicturePath` 下由 SS 存储回调落盘的图片 |
 | Events | `/ISAPI/AccessControl/AcsEvent`（补漏用） | `IsupEventIngestService` 订阅报警事件 → `AcsEventStore` 幂等入库 |
@@ -105,10 +105,65 @@ app.Run();
 
 `Distribute/` 里的方法是**面向平台同步场景**的高层封装（入参是平台 DTO，如 `SyncPersonDataPage`），
 仍然保留并被 `Customize/SyncInformation`、`SyncAuthRuleInformation` 使用（设备上线后的自动权限同步）。
-新增的控制器走的是**通用 ISAPI 透传**路径（入参是 ISAPI 风格 JSON），两者并存：
+新增的控制器走的是**通用 ISAPI 通道**路径（入参是 ISAPI 风格 JSON），两者并存：
 
 - 平台对接（请假同步、认证规则、按学校/人员批量下发）→ 继续走 `Customize/` + `Distribute/`；
 - 平台/前端直接对设备做门禁操作 → 走本项目的 REST 控制器。
+
+### 查询接口的分页约定（统一）
+
+所有**设备侧分页查询**接口（人员 / 卡片 / 人脸 / 人员权限 / 门禁事件）都只发一次请求，不自动翻页，
+而是把分页信息原样透出，由调用方决定是否继续取：
+
+| 字段 | 含义 |
+|---|---|
+| `searchResultPosition` | 本次请求的起始位置（人员/卡片/人脸/事件从 0 开始，人员权限类从 1 开始） |
+| `numOfMatches` | 本次**实际**返回的条数 |
+| `totalMatches` | 设备侧符合条件的总数 |
+| `nextPosition` | 下一页起始位置；`null` = 没有更多 |
+| `searchId` | 本次查询会话 ID，**翻页必须复用**（换值设备会当成新查询、从头发结果） |
+
+翻页方式：把 `nextPosition` 填回下一次请求的 `searchResultPosition`，并把 `searchId` 原样带上：
+
+```jsonc
+// 第 1 页
+{ "maxResults": 30 }
+// -> numOfMatches=3, totalMatches=25, nextPosition=3, searchId="5e25b161..."
+
+// 第 2 页
+{ "searchResultPosition": 3, "searchId": "5e25b161...", "maxResults": 30 }
+```
+
+`nextPosition` 的推导：设备回 `MORE` 就一定有下一页；否则按 `searchResultPosition + numOfMatches < totalMatches`；
+设备连 `totalMatches` 都没给时，退化为「本页是否装满 `maxResults`」。
+
+需要一次取全的场景（人员 / 卡片 / 计划模板）传 `fetchAll=true`，服务端循环翻页并返回聚合结果
+（此时 `nextPosition` 为 `null`）。人脸查询不提供 `fetchAll`——设备往往一页只给 3 条（`maxResults` 被固件忽略），
+一次聚合要 9+ 次往返，按需自行翻页更可控。
+
+服务端实现见 `IsupIsapiService.WithPaging` / `HasMore`（唯一的规则来源）。
+
+### ISAPI 报文通道（`ISUP:IsapiChannel`）
+
+`IsupCmsService.SendIsapiAsync` 是所有 REST 控制器下发报文的唯一出口。请求路径与报文体在四条通道上完全相同，
+只有「谁把这条 HTTP 请求发到设备」不同，按设备编号逐台选择：
+
+| 取值 | 实现 | 说明 |
+|---|---|---|
+| `http-sdk` | `NET_ECMS_ISAPIPassThrough` | SDK 转发 HTTP 请求，请求行带方法；**默认** |
+| `http-IsapiDigest` | `IsapiDigestClient`（`HttpClient` + Digest） | 平台直连设备，地址/账号取自 `ISUP:IsapiDigest:Devices`，不经 SDK |
+| `http-http` | 同 `http-IsapiDigest` | 同一实现的别名 |
+| `http-xml` | `NET_ECMS_Get/Put/Post/DeletePTXMLConfig` | 透传（XML 报文），按方法选接口，请求行只有路径 |
+
+未列出的设备走 `DefaultChannel`；人脸图片上传（multipart）固定走 `http-xml`——ISAPI 透传的参数结构体没有分段字段，
+带不了 boundary。接口返回里的 `channel` 字段给出本次实际使用的通道，便于排查固件差异。
+
+```json
+"IsapiChannel": {
+  "DefaultChannel": "http-sdk",
+  "Devices": [ { "DeviceId": "FZ7955795", "Channel": "http-xml" } ]
+}
+```
 
 ### 与 OTAP 项目的已知差异
 

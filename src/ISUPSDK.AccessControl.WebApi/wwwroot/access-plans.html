@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>权限计划 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>权限计划 <code>/api/acs/access-plans/*</code></h2>
+      <div class="row">
+        <label class="field"><span class="req">设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <label class="field"><span>子资源</span>
+          <select id="kind">
+            <option value="templates">计划模板 templates</option>
+            <option value="week-plans">周计划 week-plans</option>
+            <option value="holiday-groups">假日组 holiday-groups</option>
+            <option value="holiday-plans">假日计划 holiday-plans</option>
+          </select>
+        </label>
+        <label class="field"><span>查询标识 searchId</span><input id="searchId" placeholder="条件不变时复用同值"></label>
+        <label class="field"><span>仅使能</span>
+          <select id="enable">
+            <option value="">（全部）</option>
+            <option value="true">是</option>
+            <option value="false">否</option>
+          </select>
+        </label>
+        <label class="field"><span>每页</span><input id="pageSize" type="number" value="10" min="1" max="100"></label>
+        <label class="field"><span>页码</span><input id="pageIndex" type="number" value="1" min="1"></label>
+        <button class="primary" id="btnQuery">查询列表</button>
+        <button id="btnCap">能力集</button>
+      </div>
+      <p class="hint">
+        注意：设备的 <code>SearchResultPosition</code> 从 1 开始，页面已按 <code>pageIndex</code> 自动换算。
+        若设备返回 <code>subStatusCode=notSupport</code>，说明该型号不支持这类查询。
+      </p>
+      <div id="msg" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+      <div class="pager" id="pager"></div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <h2>单条查询 / 写入</h2>
+        <div class="row">
+          <label class="field"><span class="req">ID</span><input id="itemId" placeholder="planTemplateId / weekPlanId / holidayGroupId / holidayPlanId"></label>
+          <button id="btnGetOne">单查</button>
+          <button class="primary" id="btnPutOne">写入（按 ID）</button>
+        </div>
+        <div class="row">
+          <label class="field" style="flex:1"><span>写入请求 JSON（结构随子资源不同）</span>
+            <textarea id="writeBody" style="width:100%">{
+  "PlanTemplateId": 1,
+  "Template": { "name": "全天", "weekPlanNo": 1, "holidayGroupNo": null },
+  "TimeoutMs": 15000
+}</textarea>
+          </label>
+        </div>
+        <p class="hint">
+          模板：<code>{ PlanTemplateId, Template, TimeoutMs }</code>；周计划：<code>{ WeekPlanId, WeekPlan }</code>；
+          假日组：<code>{ HolidayGroupId, HolidayGroup }</code>；假日计划：<code>{ HolidayPlanId, HolidayPlan }</code>。
+          ID 会以 URL 里的值为准（页面会自动覆盖请求体中的对应字段名）。
+        </p>
+        <div id="msg2" class="msg hidden"></div>
+        <pre class="json" id="opResult" style="margin-top:12px">（操作结果）</pre>
+      </div>
+
+      <div class="card">
+        <h2>批量写入 / 工作日预设</h2>
+        <div class="row">
+          <label class="field" style="flex:1"><span>批量模板 JSON</span>
+            <textarea id="batchBody">{ "Templates": [], "TimeoutMs": 15000 }</textarea>
+          </label>
+        </div>
+        <div class="btnrow">
+          <button id="btnPutBatch">批量写入模板 PUT /templates</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="field" style="flex:1"><span>工作日预设 JSON</span>
+            <textarea id="presetBody">{ "WeekPlanId": 1, "PlanTemplateId": 1, "TemplateName": "工作日全天", "BeginTime": "00:00:00", "EndTime": "23:59:59", "TimeoutMs": 20000 }</textarea>
+          </label>
+        </div>
+        <div class="btnrow">
+          <button class="primary" id="btnPreset">应用“工作日全天”POST /presets/workday</button>
+        </div>
+        <div id="msg3" class="msg hidden"></div>
+        <pre class="json" id="batchResult" style="margin-top:12px">（操作结果）</pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '权限计划', active: 'access-plans.html' });
+
+    var state = { pageSize: 10, pageIndex: 1, recordCount: 0, pageCount: 1 };
+
+    function deviceId() { return ACS.el('deviceId').value.trim(); }
+    function kind() { return ACS.el('kind').value; }
+    function basePath() { return '/api/acs/access-plans/' + kind(); }
+
+    async function query(pageIndex) {
+      state.pageSize = Number(ACS.el('pageSize').value) || 10;
+      state.pageIndex = Math.max(1, pageIndex || Number(ACS.el('pageIndex').value) || 1);
+      ACS.el('pageIndex').value = state.pageIndex;
+
+      await ACS.run('msg', async function () {
+        var data = await ACS.api(basePath(), {
+          query: {
+            deviceId: deviceId(),
+            searchId: ACS.el('searchId').value.trim(),
+            enable: ACS.el('enable').value,
+            pageSize: state.pageSize,
+            pageIndex: state.pageIndex
+          }
+        });
+
+        var page = data || {};
+        state.recordCount = page.recordCount || 0;
+        state.pageCount = page.pageCount || 1;
+
+        var raw = page.pageData || {};
+        var inner = raw.data || {};
+        var list = inner.matchResults || inner.MatchResults || inner.matchList || [];
+        if (!Array.isArray(list)) list = [];
+
+        ACS.table('table', [
+          { text: '#', render: function (r, i) { return (state.pageIndex - 1) * state.pageSize + i + 1; } },
+          { text: '内容', cls: 'wrap', render: function (r) { return '<code>' + ACS.esc(JSON.stringify(r).slice(0, 420)) + '</code>'; } },
+          { text: '状态', render: function (r) {
+              var status = r.enable;
+              if (status === undefined) status = r.Enable;
+              return status === undefined ? '' : '<span class="tag ' + (status ? 'ok' : '') + '">' + (status ? '使能' : '禁用') + '</span>';
+            } }
+        ], list, '该页没有数据（totalMatches=' + state.recordCount + '）');
+
+        ACS.pager('pager', state.pageSize, state.pageIndex, state.recordCount, state.pageCount, function (next) {
+          query(next);
+        });
+      }, '查询完成：RecordCount=' + state.recordCount);
+    }
+
+    ACS.el('btnQuery').addEventListener('click', function () { query(1); });
+
+    ACS.el('btnCap').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        ACS.showJson('opResult', await ACS.api('/api/acs/access-plans/capabilities', { query: { deviceId: deviceId() } }));
+      }, '已读取权限计划能力集');
+    });
+
+    ACS.el('btnGetOne').addEventListener('click', function () {
+      var id = ACS.el('itemId').value.trim();
+      if (!id) { ACS.msg('msg2', 'warn', '请填 ID'); return; }
+      ACS.run('msg2', async function () {
+        ACS.showJson('opResult', await ACS.api(basePath() + '/' + encodeURIComponent(id), { query: { deviceId: deviceId() } }));
+      }, '已查询单条');
+    });
+
+    ACS.el('btnPutOne').addEventListener('click', function () {
+      var id = ACS.el('itemId').value.trim();
+      if (!id) { ACS.msg('msg2', 'warn', '请填 ID'); return; }
+
+      ACS.run('msg2', async function () {
+        var body = ACS.parseJson(ACS.el('writeBody').value, '写入 JSON') || {};
+        var numericId = Number(id);
+
+        switch (kind()) {
+          case 'templates': body.PlanTemplateId = numericId; break;
+          case 'week-plans': body.WeekPlanId = numericId; break;
+          case 'holiday-groups': body.HolidayGroupId = numericId; break;
+          case 'holiday-plans': body.HolidayPlanId = numericId; break;
+        }
+
+        ACS.showJson('opResult', await ACS.api(basePath() + '/' + encodeURIComponent(id), {
+          method: 'PUT',
+          query: { deviceId: deviceId() },
+          body: body
+        }));
+      }, '已写入');
+    });
+
+    ACS.el('btnPutBatch').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/access-plans/templates', {
+          method: 'PUT',
+          query: { deviceId: deviceId() },
+          body: ACS.parseJson(ACS.el('batchBody').value, '批量模板 JSON')
+        }));
+      }, '批量写入完成');
+    });
+
+    ACS.el('btnPreset').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('batchResult', await ACS.api('/api/acs/access-plans/presets/workday', {
+          method: 'POST',
+          query: { deviceId: deviceId() },
+          body: ACS.parseJson(ACS.el('presetBody').value, '预设 JSON')
+        }));
+      }, '工作日预设已下发');
+    });
+
+    ACS.el('kind').addEventListener('change', function () {
+      var map = {
+        templates: '{\n  "PlanTemplateId": 1,\n  "Template": { "name": "全天", "weekPlanNo": 1 },\n  "TimeoutMs": 15000\n}',
+        'week-plans': '{\n  "WeekPlanId": 1,\n  "WeekPlan": { "weekPlanName": "一周" },\n  "TimeoutMs": 15000\n}',
+        'holiday-groups': '{\n  "HolidayGroupId": 1,\n  "HolidayGroup": { "holidayGroupName": "2026" },\n  "TimeoutMs": 15000\n}',
+        'holiday-plans': '{\n  "HolidayPlanId": 1,\n  "HolidayPlan": { "holidayPlanName": "国庆" },\n  "TimeoutMs": 15000\n}'
+      };
+      ACS.el('writeBody').value = map[kind()] || '{}';
+    });
+
+    query(1);
+  </script>
+</body>
+
+</html>

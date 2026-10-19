@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设备 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>设备列表 <code>GET /api/acs/devices</code></h2>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="onlineOnly"> 只看在线</label>
+        <button class="primary" id="btnRefresh">刷新</button>
+        <button id="btnSdk">SDK 运行状态</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2>单个设备 / 操作</h2>
+      <div class="row">
+        <label class="field"><span class="req">设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <button id="btnGet">查详情 <code>GET /{deviceId}</code></button>
+        <button id="btnInfo">设备信息 <code>GET /{deviceId}/info</code></button>
+        <button class="danger" id="btnKick">强制下线 <code>DELETE /{deviceId}/session</code></button>
+        <button id="btnPush">下发 HTTP 上报 <code>POST /{deviceId}/http-push</code></button>
+      </div>
+      <div class="row">
+        <label class="field"><span>上报 IP（可选）</span><input id="pushAddress" placeholder="留空用服务端配置"></label>
+        <label class="field"><span>上报端口（可选）</span><input id="pushPort" placeholder="如 8083"></label>
+        <label class="field"><span>上报路径（可选）</span><input id="pushUrl" placeholder="/"></label>
+      </div>
+      <div id="msg2" class="msg hidden"></div>
+      <pre class="json" id="detail" style="margin-top:12px">（点上面的按钮查看结果）</pre>
+    </div>
+
+    <div class="card">
+      <h2>注册监听器</h2>
+      <div class="row">
+        <label class="field"><span>监听 IP（可选）</span><input id="listenIp" placeholder="留空用默认"></label>
+        <label class="field"><span>监听端口（可选）</span><input id="listenPort" placeholder="留空用默认"></label>
+        <label class="field"><span>监听类型（可选）</span><input id="listenType" placeholder="0/1/2"></label>
+        <button class="primary" id="btnListenAdd">新建监听 <code>POST /listeners</code></button>
+        <label class="field"><span>句柄</span><input id="listenHandle" placeholder="如 0"></label>
+        <button class="danger" id="btnListenDel">关闭监听 <code>DELETE /listeners/{handle}</code></button>
+      </div>
+      <div id="msg3" class="msg hidden"></div>
+    </div>
+
+    <div class="card">
+      <h2>原始 ISAPI 透传 <code>POST /api/acs/devices/{deviceId}/isapi</code></h2>
+      <div class="row">
+        <label class="field" style="flex:1"><span class="req">请求体</span>
+          <textarea id="isapiBody" style="width:100%">{
+  "requestUrl": "GET /ISAPI/System/deviceInfo",
+  "body": null,
+  "timeoutMs": 15000
+}</textarea>
+        </label>
+      </div>
+      <div class="row">
+        <button id="btnIsapiDemo">填入示例</button>
+        <button class="primary" id="btnIsapi">执行透传</button>
+      </div>
+      <div id="msg4" class="msg hidden"></div>
+      <pre class="json" id="isapiResult" style="margin-top:12px">（透传结果）</pre>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '设备', active: 'devices.html' });
+
+    function deviceId() { return ACS.el('deviceId').value.trim(); }
+
+    async function loadList() {
+      await ACS.run('msg', async function () {
+        var rows = await ACS.api('/api/acs/devices', {
+          query: { onlineOnly: ACS.el('onlineOnly').checked ? 'true' : 'false' }
+        });
+        ACS.table('table', [
+          { text: '设备 SN', key: 'deviceId' },
+          { text: '名称', key: 'deviceName' },
+          { text: '在线', render: function (r) { return r.online ? '<span class="tag ok">在线</span>' : '<span class="tag err">离线</span>'; } },
+          { text: '协议', key: 'protocolVersion' },
+          { text: '型号/固件', render: function (r) { return ACS.esc(r.deviceModel || '') + ' ' + ACS.esc(r.firmwareVersion || ''); } },
+          { text: 'UserId', key: 'userId' },
+          { text: '首次上线', render: function (r) { return ACS.fmtTime(r.firstOnlineAt); } },
+          { text: '最近变化', render: function (r) { return ACS.fmtTime(r.lastChangedAt); } },
+          {
+            text: '操作', cls: 'op', render: function (r) {
+              return '<button data-pick="' + ACS.esc(r.deviceId) + '">选中</button>';
+            }
+          }
+        ], rows, '没有设备注册（确认设备已连到 ISUP 服务）');
+
+        document.querySelectorAll('button[data-pick]').forEach(function (b) {
+          b.addEventListener('click', function () { ACS.el('deviceId').value = b.getAttribute('data-pick'); });
+        });
+      }, '设备列表已刷新');
+    }
+
+    ACS.el('btnRefresh').addEventListener('click', loadList);
+    ACS.el('btnSdk').addEventListener('click', function () {
+      ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/system');
+        ACS.showJson('detail', data);
+      }, '已读取服务状态（见下方）');
+    });
+
+    ACS.el('btnGet').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/devices/' + encodeURIComponent(deviceId())));
+      }, '已获取设备详情');
+    });
+
+    ACS.el('btnInfo').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/devices/' + encodeURIComponent(deviceId()) + '/info'));
+      }, '已获取设备信息（ISAPI 实时查询）');
+    });
+
+    ACS.el('btnKick').addEventListener('click', function () {
+      if (!confirm('确认强制下线设备 ' + deviceId() + '？')) return;
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/devices/' + encodeURIComponent(deviceId()) + '/session', { method: 'DELETE' }));
+      }, '已请求强制下线');
+    });
+
+    ACS.el('btnPush').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/devices/' + encodeURIComponent(deviceId()) + '/http-push', {
+          method: 'POST',
+          query: {
+            address: ACS.el('pushAddress').value.trim(),
+            port: ACS.el('pushPort').value.trim(),
+            url: ACS.el('pushUrl').value.trim()
+          }
+        }));
+      }, '已下发 HTTP 上报配置');
+    });
+
+    ACS.el('btnListenAdd').addEventListener('click', function () {
+      ACS.run('msg3', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/devices/listeners', {
+          method: 'POST',
+          query: {
+            ip: ACS.el('listenIp').value.trim(),
+            port: ACS.el('listenPort').value.trim(),
+            listenType: ACS.el('listenType').value.trim()
+          }
+        }));
+      }, '监听已创建（句柄见 detail）');
+    });
+
+    ACS.el('btnListenDel').addEventListener('click', function () {
+      var handle = ACS.el('listenHandle').value.trim();
+      if (!handle) { ACS.msg('msg3', 'warn', '请先填监听句柄'); return; }
+      ACS.run('msg3', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/devices/listeners/' + encodeURIComponent(handle), { method: 'DELETE' }));
+      }, '监听已关闭');
+    });
+
+    ACS.el('btnIsapiDemo').addEventListener('click', function () {
+      ACS.el('isapiBody').value = JSON.stringify({
+        requestUrl: 'GET /ISAPI/System/deviceInfo',
+        body: null,
+        timeoutMs: 15000
+      }, null, 2);
+    });
+
+    ACS.el('btnIsapi').addEventListener('click', function () {
+      ACS.run('msg4', async function () {
+        var body = ACS.parseJson(ACS.el('isapiBody').value, '透传请求体');
+        ACS.showJson('isapiResult', await ACS.api('/api/acs/devices/' + encodeURIComponent(deviceId()) + '/isapi', {
+          method: 'POST',
+          body: body
+        }));
+      }, '透传完成（结果见下方）');
+    });
+
+    loadList();
+  </script>
+</body>
+
+</html>

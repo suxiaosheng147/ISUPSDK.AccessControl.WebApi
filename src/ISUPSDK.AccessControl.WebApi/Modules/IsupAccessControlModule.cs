@@ -25,7 +25,9 @@ public static class IsupAccessControlModule
         builder.Services.Configure<IsupTimeOptions>(builder.Configuration.GetSection(IsupTimeOptions.SectionName));
         builder.Services.Configure<AcsTaskQueueOptions>(builder.Configuration.GetSection(AcsTaskQueueOptions.SectionName));
 
-        // ---- 设备访问层：设备表 + PTXML 透传 ----
+        // ---- 设备访问层：设备表 + ISAPI 透传 ----
+        // 报文发往设备的通道（执行 HTTP 请求 / PTXML 透传）按设备编号切换，配置节：ISUP:IsapiChannel。
+        builder.Services.Configure<IsapiChannelOptions>(builder.Configuration.GetSection(IsapiChannelOptions.SectionName));
         builder.Services.AddSingleton<IsupCmsService>();
         // ---- ISAPI 业务服务：人员/卡片/人脸/计划模板/门禁控制的报文组装 ----
         builder.Services.AddSingleton<IsupIsapiService>();

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>下发任务 - 门禁对接控制台</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+
+<body>
+  <div id="app">
+    <div class="card">
+      <h2>下发任务 <code>GET /api/acs/tasks</code></h2>
+      <p class="hint">
+        人员 / 卡片 / 人脸的新增、修改、删除是异步任务（接口返回 202 与任务信息），在这里查执行结果。
+        门禁服务只支持 limit，因此只有 pageSize（取最新 N 条）。
+      </p>
+      <div class="row">
+        <label class="field"><span>设备 SN</span><input id="deviceId" placeholder="如 FZ7955795"></label>
+        <label class="field"><span>对象类型</span>
+          <select id="entity">
+            <option value="">（全部）</option>
+            <option value="Person">Person</option>
+            <option value="Card">Card</option>
+            <option value="Face">Face</option>
+            <option value="FaceLibrary">FaceLibrary</option>
+          </select>
+        </label>
+        <label class="field"><span>状态</span>
+          <select id="status">
+            <option value="">（全部）</option>
+            <option value="Pending">Pending</option>
+            <option value="Running">Running</option>
+            <option value="Succeeded">Succeeded</option>
+            <option value="Failed">Failed</option>
+            <option value="Canceled">Canceled</option>
+          </select>
+        </label>
+        <label class="field"><span>条数</span><input id="pageSize" type="number" value="20" min="1" max="500"></label>
+        <button class="primary" id="btnQuery">查询</button>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+      <div id="table" style="margin-top:12px"></div>
+      <div id="pager" class="pager"></div>
+    </div>
+
+    <div class="card">
+      <h2>单个任务 <code>GET /api/acs/tasks/{id}</code></h2>
+      <div class="row">
+        <label class="field"><span class="req">任务 ID</span><input id="taskId" style="min-width:320px"></label>
+        <button id="btnDetail">查详情</button>
+        <button class="primary" id="btnRetry">重新排队 POST /{id}/retries</button>
+        <button class="danger" id="btnCancel">取消 DELETE /{id}</button>
+      </div>
+      <div id="msg2" class="msg hidden"></div>
+      <pre class="json" id="detail" style="margin-top:12px">（任务详情）</pre>
+    </div>
+  </div>
+
+  <script src="assets/app.js"></script>
+  <script>
+    ACS.layout({ title: '下发任务', active: 'tasks.html' });
+
+    function statusTag(status) {
+      var cls = '';
+      if (status === 'Succeeded') cls = 'ok';
+      else if (status === 'Failed') cls = 'err';
+      else if (status === 'Running' || status === 'Pending') cls = 'warn';
+      return '<span class="tag ' + cls + '">' + ACS.esc(status || '') + '</span>';
+    }
+
+    function taskId() {
+      var value = ACS.el('taskId').value.trim();
+      if (!value) throw new Error('请填写任务 ID');
+      return value;
+    }
+
+    async function query() {
+      var pageSize = Number(ACS.el('pageSize').value) || 20;
+
+      await ACS.run('msg', async function () {
+        var data = await ACS.api('/api/acs/tasks', {
+          query: {
+            deviceId: ACS.el('deviceId').value.trim(),
+            entity: ACS.el('entity').value,
+            status: ACS.el('status').value,
+            pageSize: pageSize
+          }
+        });
+
+        var page = data || {};
+        var rows = page.pageData || [];
+
+        ACS.table('table', [
+          { text: '任务 ID', render: function (r) { return '<code>' + ACS.esc(r.id) + '</code>'; } },
+          { text: '设备', render: function (r) { return ACS.esc(r.deviceId || ''); } },
+          { text: '对象', render: function (r) { return '<span class="tag">' + ACS.esc(r.entity || '') + '</span>'; } },
+          { text: '操作', render: function (r) { return ACS.esc(r.operation || ''); } },
+          { text: '状态', render: function (r) { return statusTag(r.status); } },
+          { text: '尝试', render: function (r) { return ACS.esc(r.attempts === undefined ? '' : r.attempts); } },
+          { text: '创建', render: function (r) { return ACS.fmtTime(r.createdAt); } },
+          { text: '完成', render: function (r) { return ACS.fmtTime(r.completedAt); } },
+          { text: '错误', cls: 'wrap', render: function (r) { return ACS.esc(r.lastError || ''); } },
+          { text: '操作', cls: 'op', render: function (r) {
+              return '<button data-id="' + ACS.esc(r.id) + '">详情</button>';
+            } }
+        ], rows, '没有任务（RecordCount=' + (page.recordCount || 0) + '）');
+
+        document.querySelectorAll('#table button[data-id]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            ACS.el('taskId').value = button.getAttribute('data-id');
+            ACS.el('btnDetail').click();
+          });
+        });
+
+        ACS.pager('pager', pageSize, 1, page.recordCount || 0, page.pageCount || 1, function () { });
+      }, '查询完成：' + ((data && data.recordCount) || 0) + ' 条');
+    }
+
+    ACS.el('btnQuery').addEventListener('click', query);
+
+    ACS.el('btnDetail').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/tasks/' + encodeURIComponent(taskId())));
+      }, '已获取任务详情');
+    });
+
+    ACS.el('btnRetry').addEventListener('click', function () {
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/tasks/' + encodeURIComponent(taskId()) + '/retries', { method: 'POST' }));
+      }, '任务已重新排队');
+    });
+
+    ACS.el('btnCancel').addEventListener('click', function () {
+      var id;
+      try { id = taskId(); } catch (e) { ACS.msg('msg2', 'warn', e.message); return; }
+      if (!confirm('确认取消任务 ' + id + '？（只能取消 Pending）')) return;
+      ACS.run('msg2', async function () {
+        ACS.showJson('detail', await ACS.api('/api/acs/tasks/' + encodeURIComponent(id), { method: 'DELETE' }));
+      }, '任务已取消');
+    });
+
+    query();
+  </script>
+</body>
+
+</html>
