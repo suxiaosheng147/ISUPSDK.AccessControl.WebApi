@@ -51,12 +51,14 @@ public sealed class AcsAlarmForwardService
     /// <summary>设备上报"图片上传失败"时 PicDataUrl 的占位值。</summary>
     private const string PictureUploadFailed = "Failed-to-upload-picture";
 
+    /// <summary>未配置 <c>ISUP:IsapiDigest:PictureUrlPrefix</c> 时使用的图片接口相对路径。</summary>
+    private const string PictureUrlPath = "/api/events/pictures";
+
     /// <summary>PPVSPMessage 解析器（线程安全，可复用）。</summary>
     private static readonly XmlSerializer PayloadSerializer = new(typeof(PPVSPMessage));
 
     private readonly IsupSdkRuntime _runtime;
     private readonly IsapiDigestClient _digest;
-    private readonly IConfiguration _configuration;
     private readonly ILogger<AcsAlarmForwardService> _logger;
 
     private long _forwarded;
@@ -67,12 +69,10 @@ public sealed class AcsAlarmForwardService
     public AcsAlarmForwardService(
         IsupSdkRuntime runtime,
         IsapiDigestClient digest,
-        IConfiguration configuration,
         ILogger<AcsAlarmForwardService> logger)
     {
         _runtime = runtime;
         _digest = digest;
-        _configuration = configuration;
         _logger = logger;
     }
 
@@ -81,25 +81,13 @@ public sealed class AcsAlarmForwardService
         => _digest.ResolvePictureDirectory(_runtime.CurrentSettings.Photo);
 
     /// <summary>
-    /// 抓拍图对外 URL 前缀：优先 <c>ISUP:IsapiDigest:PictureUrlPrefix</c>，
-    /// 留空时按 <c>Settings:ServerAddress</c> + Kestrel 监听端口推导为
-    /// <c>http://{ServerAddress}:{port}/api/events/pictures</c>。
+    /// 抓拍图对外 URL 前缀，**只**来自配置 <c>ISUP:IsapiDigest:PictureUrlPrefix</c>
+    /// （如 <c>http://10.0.0.5:5190/api/events/pictures</c>，反代 / 域名场景写
+    /// <c>https://acs.example.com/acs-pictures</c>）；留空时用相对路径
+    /// <c>/api/events/pictures</c>（浏览器按页面同源解析，不依赖任何 IP 配置）。
     /// </summary>
     public string ResolvePictureUrlPrefix()
-    {
-        if (_digest.ConfiguredPictureUrlPrefix is { } configured)
-        {
-            return configured;
-        }
-
-        var host = _runtime.CurrentSettings.ServerAddress;
-        if (string.IsNullOrWhiteSpace(host))
-        {
-            host = "127.0.0.1";
-        }
-
-        return $"http://{host.Trim()}:{ResolveHttpPort()}/api/events/pictures";
-    }
+        => _digest.ConfiguredPictureUrlPrefix ?? PictureUrlPath;
 
     /// <summary>
     /// 把请求里的文件名解析成落盘目录下的绝对路径；文件名非法（含路径分隔符 / 上级目录）返回 null。
@@ -123,20 +111,6 @@ public sealed class AcsAlarmForwardService
            && !fileName.Contains("..", StringComparison.Ordinal)
            && fileName.IndexOfAny(['/', '\\']) < 0
            && fileName == Path.GetFileName(fileName);
-
-    /// <summary>Kestrel 的 HTTP 监听端口（读不到时回退 5190）。</summary>
-    private int ResolveHttpPort()
-    {
-        var url = _configuration["Kestrel:Endpoints:Http:Url"];
-        if (!string.IsNullOrWhiteSpace(url) &&
-            Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
-            uri.Port > 0)
-        {
-            return uri.Port;
-        }
-
-        return 5190;
-    }
 
     /// <summary>已成功转发到下游队列的条数。</summary>
     public long Forwarded => Interlocked.Read(ref _forwarded);
@@ -468,6 +442,59 @@ public sealed class AcsAlarmForwardService
     }
 
     /// <summary>
+    /// 用 Digest 下载抓拍图并按给定文件名落盘，返回落盘结果（<b>对账 / 高频轮询复用</b>，
+    /// 让入库事件的 <c>pictures</c> / <c>pictureUrls</c> 也有值）。
+    /// <para>
+    /// 开关为 <c>ISUP:IsapiDigest:DownloadPictures</c>；文件已存在时不再重复下载。
+    /// </para>
+    /// </summary>
+    public async Task<PictureSaveResult> TryDownloadPictureFileAsync(
+        string deviceId,
+        string? pictureUrl,
+        string fileName,
+        CancellationToken ct = default)
+    {
+        if (!_digest.DownloadPictures ||
+            string.IsNullOrWhiteSpace(pictureUrl) ||
+            !IsSafePictureFileName(fileName))
+        {
+            return PictureSaveResult.Skipped;
+        }
+
+        var directory = ResolvePictureDirectory();
+        var path = Path.Combine(directory ?? string.Empty, fileName);
+
+        // 同一事件的抓拍图已落盘（对账 / 轮询重复扫描同一区间）：直接复用，不再发请求。
+        if (File.Exists(path))
+        {
+            return PictureSaveResult.Reused(fileName);
+        }
+
+        try
+        {
+            var bytes = await _digest.TryDownloadPictureAsync(deviceId, pictureUrl, ct).ConfigureAwait(false);
+            if (bytes is null || bytes.Length == 0)
+            {
+                return PictureSaveResult.Failed;
+            }
+
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await File.WriteAllBytesAsync(path, bytes, ct).ConfigureAwait(false);
+
+            return PictureSaveResult.Saved(fileName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "保存抓拍图失败：{File}", fileName);
+            return PictureSaveResult.Failed;
+        }
+    }
+
+    /// <summary>
     /// 用 Digest 下载抓拍图并落盘；成功返回"本地绝对路径 + 平台对外 URL"，
     /// 失败返回 null（调用方留空，不发设备地址）。
     /// </summary>
@@ -479,12 +506,6 @@ public sealed class AcsAlarmForwardService
         int userId,
         CancellationToken ct)
     {
-        var bytes = await _digest.TryDownloadPictureAsync(deviceId, pictureUrl, ct).ConfigureAwait(false);
-        if (bytes is null || bytes.Length == 0)
-        {
-            return null;
-        }
-
         var fileName = new StringBuilder(128)
             .Append(deviceId)
             .Append('_')
@@ -493,24 +514,15 @@ public sealed class AcsAlarmForwardService
             .Append(userId).Append(".jpeg")
             .ToString();
 
-        try
+        var saved = await TryDownloadPictureFileAsync(deviceId, pictureUrl, fileName, ct).ConfigureAwait(false);
+        if (saved.FileName is not { } pictureFile)
         {
-            var directory = ResolvePictureDirectory();
-            if (!string.IsNullOrWhiteSpace(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            var path = Path.Combine(directory ?? string.Empty, fileName);
-            await File.WriteAllBytesAsync(path, bytes, ct).ConfigureAwait(false);
-
-            return new DownloadedPicture(path, $"{ResolvePictureUrlPrefix()}/{fileName}");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "保存抓拍图失败：{File}", fileName);
             return null;
         }
+
+        var path = Path.GetFullPath(Path.Combine(ResolvePictureDirectory() ?? string.Empty, pictureFile));
+
+        return new DownloadedPicture(path, $"{ResolvePictureUrlPrefix()}/{pictureFile}");
     }
 
     /// <summary>下载成功的抓拍图：本地绝对路径 + 平台对外 URL（指向 <c>GET /api/events/pictures/{fileName}</c>）。</summary>
@@ -696,3 +708,27 @@ public readonly record struct AcsAlarmForwardResult(AcsAlarmForwardStatus Status
 
     public static AcsAlarmForwardResult Failed(string detail) => new(AcsAlarmForwardStatus.Failed, detail);
 }
+
+/// <summary>
+/// 抓拍图落盘结果。
+/// <para>
+/// <see cref="FileName"/> 是落盘的纯文件名（未落盘为 null，可直接拼
+/// <c>GET /api/events/pictures/{fileName}</c>）；<see cref="Attempted"/> 表示本次是否真的
+/// 向设备发起了下载 —— 已存在的文件为 false，对账/轮询据此做"单轮下载次数"限流。
+/// </para>
+/// </summary>
+public readonly record struct PictureSaveResult(string? FileName, bool Attempted)
+{
+    /// <summary>未发起下载：开关关闭 / 无 pictureURL / 文件名非法。</summary>
+    public static PictureSaveResult Skipped => new(null, false);
+
+    /// <summary>发起了下载但失败（非 2xx、设备上图片已被覆盖、落盘异常）。</summary>
+    public static PictureSaveResult Failed => new(null, true);
+
+    /// <summary>下载并落盘成功。</summary>
+    public static PictureSaveResult Saved(string fileName) => new(fileName, true);
+
+    /// <summary>文件已存在，直接复用（未发请求）。</summary>
+    public static PictureSaveResult Reused(string fileName) => new(fileName, false);
+}
+

@@ -21,6 +21,7 @@ internal static class AcsEventPayloadExtractor
         record.PictureFileNames = evt.PictureFileNames is { Count: > 0 }
             ? JsonSerializer.Serialize(evt.PictureFileNames)
             : null;
+        record.PictureUrl = Truncate(evt.PictureUrl, 512);
         record.ListenHandle = evt.ListenHandle == 0 ? null : evt.ListenHandle;
 
         if (string.IsNullOrWhiteSpace(evt.Payload))

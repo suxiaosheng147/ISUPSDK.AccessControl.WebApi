@@ -160,19 +160,23 @@ public sealed class EventsController : ControllerBase
     /// 查询已入库的（门禁）事件，按事件时间倒序，支持分页与多条件过滤。
     /// </summary>
     /// <remarks>
+    /// 每条事件的 <c>pictures</c> 是抓拍图文件名，<c>pictureUrls</c> 是对应的可访问 URL
+    /// （前缀取配置 <c>ISUP:IsapiDigest:PictureUrlPrefix</c>，未配置时为相对路径
+    /// <c>/api/events/pictures</c>；无图或非门禁事件时为 null）。
     /// 示例：<c>GET /api/events?deviceId=DS-K1T670M&amp;accessControlOnly=true&amp;from=2026-10-01T00:00:00%2B08:00&amp;limit=50</c>
     /// </remarks>
     [HttpGet]
     public async Task<IActionResult> Query([FromQuery] AcsEventQuery query, CancellationToken ct)
     {
         var (items, total) = await _store.QueryAsync(query, ct).ConfigureAwait(false);
+        var pictureUrlPrefix = _forwarder.ResolvePictureUrlPrefix();
 
         return Ok(ApiResponse<object>.Ok(new
         {
             total,
             limit = Math.Clamp(query.Limit, 1, 1000),
             offset = Math.Max(query.Offset, 0),
-            items = items.Select(AcsEventRecordDto.From).ToList(),
+            items = items.Select(record => AcsEventRecordDto.From(record, pictureUrlPrefix)).ToList(),
         }));
     }
 
@@ -186,7 +190,8 @@ public sealed class EventsController : ControllerBase
             throw new IsupApiException($"未找到 ID 为 {id} 的事件。", StatusCodes.Status404NotFound);
         }
 
-        return Ok(ApiResponse<AcsEventRecordDto>.Ok(AcsEventRecordDto.From(record)));
+        return Ok(ApiResponse<AcsEventRecordDto>.Ok(
+            AcsEventRecordDto.From(record, _forwarder.ResolvePictureUrlPrefix())));
     }
 
     /// <summary>

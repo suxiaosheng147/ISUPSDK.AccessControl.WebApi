@@ -83,6 +83,10 @@ public sealed class AcsEventStore
             if (_options.AutoCreate)
             {
                 await db.Database.EnsureCreatedAsync(ct).ConfigureAwait(false);
+
+                // EnsureCreated 只建库、不补列：老库升级后需要补一次，
+                // 否则查询 AcsEvents 会因缺少 PictureUrl 列而报错。
+                await EnsurePictureUrlColumnAsync(db, ct).ConfigureAwait(false);
             }
 
             if (await ProbeSchemaAsync(db, ct).ConfigureAwait(false))
@@ -104,9 +108,31 @@ public sealed class AcsEventStore
         }
     }
 
-    /// <summary>探测事件表是否可用（并记录 schema 错误）。</summary>
-    private async Task<bool> ProbeSchemaAsync(AcsEventDbContext db, CancellationToken ct)
+    /// <summary>
+    /// 老库升级补列：加 <c>PictureUrl</c>（外部图片直链）。语句按 provider 生成，
+    /// 列已存在（新库 / 已升级过）时忽略异常。
+    /// </summary>
+    private async Task EnsurePictureUrlColumnAsync(AcsEventDbContext db, CancellationToken ct)
     {
+        var sql = db.Database.IsSqlServer()
+            ? $"ALTER TABLE {TableName} ADD PictureUrl nvarchar(512) NULL"
+            : db.Database.IsMySql()
+                ? $"ALTER TABLE {TableName} ADD COLUMN PictureUrl varchar(512) NULL"
+                : $"ALTER TABLE {TableName} ADD COLUMN PictureUrl TEXT NULL";
+
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(sql, ct).ConfigureAwait(false);
+            _logger.LogInformation("事件表已补列 {Table}.PictureUrl（外部图片直链）。", TableName);
+        }
+        catch (Exception)
+        {
+            // 列已存在：忽略。
+        }
+    }
+
+    /// <summary>探测事件表是否可用（并记录 schema 错误）。</summary>
+    private async Task<bool> ProbeSchemaAsync(AcsEventDbContext db, CancellationToken ct)    {
         try
         {
             await db.Events.AnyAsync(ct).ConfigureAwait(false);

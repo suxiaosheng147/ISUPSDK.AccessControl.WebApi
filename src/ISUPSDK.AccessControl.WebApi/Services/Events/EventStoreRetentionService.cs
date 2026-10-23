@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 namespace ISUPSDK.AccessControl.WebApi.Services.Events;
 
 /// <summary>
-/// 事件保留策略：按 <c>EventStore:RetentionDays</c> 定时删除过旧的事件行（0 表示不清理）。
+/// 事件保留策略：按 <c>ISUP:EventStore:RetentionDays</c> 定时删除过旧的事件行（0 表示不清理）。
 /// </summary>
 public sealed class EventStoreRetentionService : BackgroundService
 {

@@ -155,7 +155,8 @@ ISAPI 透传失败 `502`（`code` 为 SDK 错误码）；事件库未就绪 `503
 
 内置页面 `wwwroot/events.html` 提供：事件管道状态看板、多条件查询（主/次类型、事件类型、来源、
 认证方式、设备、时间段、关键字）、详情报文查看、手工补录、手动对账补漏与落盘重放，
-数据全部来自 `GET /api/events*` 系列接口。
+数据全部来自 `GET /api/events*` 系列接口。列表里的「抓拍图」列显示缩略图（多张标 `+N`），
+详情弹窗里给出可点击查看原图的图集。
 
 > **写操作为异步任务**：人员 / 卡片 / 人脸的新增、修改、删除返回 `202` 与任务 ID，
 > 用 `GET /api/tasks/{id}` 查询执行结果；查询类接口为同步。
@@ -225,10 +226,23 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
   这类报文带 `pictureURL`（人脸事件抓拍图，需 Digest 认证才能取）。落盘开关与目录由本节点控制：
   `DownloadPictures`（是否下载）与 `PictureDirectory`（目录，留空沿用 `Settings:Photo`）。
   转发报文里的图片字段用**平台自己的地址**（不用设备地址，下游无需访问设备）：
-  - `ExtEventPictureURL` = `{PictureUrlPrefix}/{文件名}`，默认前缀按 `Settings:ServerAddress` + Kestrel 端口推导为
-    `http://{ServerAddress}:{port}/api/events/pictures`，可用 `PictureUrlPrefix` 覆盖（反代/域名场景）；
+  - `ExtEventPictureURL` = `{PictureUrlPrefix}/{文件名}`：前缀**只**取配置
+    `ISUP:IsapiDigest:PictureUrlPrefix`（例：`http://10.0.0.5:5190/api/events/pictures`，反代/域名写
+    `https://acs.example.com/acs-pictures`，末尾不带 `/`）。不再按 `Settings:ServerAddress` 推导
+    —— 那个地址通常只在设备网段可达；留空时用相对路径 `/api/events/pictures`（前端按同源解析即可显示）；
   - `ExtEventPicture` = 落盘文件的本地绝对路径；
   - 平台侧按 `GET /api/events/pictures/{文件名}` 提供图片（只接受纯文件名，防目录穿越）；
+  - `GET /api/events` / `GET /api/events/{id}` 返回的事件项里，`pictures` 是文件名数组、`pictureUrls` 是用同一前缀
+    拼出的 URL 数组（与 `pictures` 一一对应，无图时为 `null`），前端可直接作为 `<img src>` 显示；
+  - **图片在入库前解析**（消费者统一处理，开关 `EventQueue:Consumer:DownloadPictures`，
+    单批下载上限 `MaxPictureDownloadsPerBatch` 默认 50，失败只记日志、不影响入库）：
+    - ISAPI JSON 报文带 `pictureURL`（Digest 直连 / 对账 / 推送）→ 设备本地地址、**要 Digest 认证**，
+      平台下载落盘，文件名进 `pictures`；
+    - SDK 报警回调的 PPVSPMessage XML → `Params.PicDataUrl` 指向图片服务器，该地址**可直接访问、不需要下载**，
+      平台只把展开后的完整 URL 存进事件的 `PictureUrl` 列（`PictureServerType=2` 云存储拼
+      `http://{PictureServerIP}:{PictureServerPort}`，`=3` KMS 报文里就是完整地址），
+      查询时直接出现在 `pictureUrls` 里；
+    - SDK 的 AcsEvent 查询本身不返回 `pictureURL`（只有直连设备的历史事件才有），所以 SDK 通道补的事件没图；
   - 下载失败时两个字段都留空（不回落成设备地址）。
   逐设备用的通道见响应的 `items[].channel`（`IsapiDigest` / `Sdk` / `None`）。
 
@@ -253,6 +267,12 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
   响应里的 `truncated=true` 表示到页数上限时设备还有剩余（同时给出 `maxPages`）：
   调大 `maxPages`，或用该设备的 `items[].nextFrom` 作为新的 `from` 继续补
   （`nextFrom` 是本轮最后一条事件的时间，设备按时间升序返回）。
+- **对账补的抓拍图**：设备返回的事件带 `pictureURL`（人脸类）时，对账/高频轮询会用 Digest 下载并落盘，
+  文件名随事件入库 —— 因此 `GET /api/events` 的 `pictures` / `pictureUrls` 对补漏的事件同样有值。
+  开关与限流：`EventReconcile:DownloadPictures`（默认 `true`，实际下载还要求 `ISUP:IsapiDigest:DownloadPictures=true`）、
+  `EventReconcile:MaxPictureDownloadsPerRun`（单设备单轮最多发起多少次下载，默认 200，`0` = 不限；
+  启动补历史默认回看 60 天，设备上的图多已被循环覆盖，限流避免拖慢对账）。
+  同一事件重复对账时文件名稳定（`{设备}_{事件时间}_{事件序号}.jpeg`），已落盘的文件直接复用、不再下载。
 - **补齐 0 条怎么排查**：加 `dryRun=true` 只查询不写库（`POST /api/events/reconcile?dryRun=true&from=…&to=…`），
   - `queried`：设备实际返回的事件条数（0 表示设备侧就没有/没查到）；
   - `items[].error`：查询失败原因，含 `subStatusCode` 与设备原始响应摘要（截断 1000 字符）；
@@ -261,7 +281,9 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
   服务端对设备响应做了多层清理：原生输出缓冲先清零、按 SDK 返回长度并在首个 NUL 处截断、
   再截到第一个完整 JSON 值（设备常在正文后跟 `0x03` 结束符或零填充/残留字节）；
   日志里出现"响应无法解析为 JSON"时，看该告警附带的响应片段。
-- 保留策略：`ISUP:EventStore:RetentionDays > 0` 时按 `RetentionSweepHours` 周期清理过期事件。
+- 保留策略：`ISUP:EventStore:RetentionDays`（默认 **90**）> 0 时，每 `RetentionSweepHours`（默认 24）小时
+  删除 `EventTime` 早于该天数的 `AcsEventRecord` 行；设 `0` 表示永久保留。任务库的 `AcsTask`
+  同理，配置项见下节 `ISUP:TaskQueue:CompletedRetentionDays`。
 
 #### 事件库的数据库选择
 
@@ -350,6 +372,14 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
   | MySQL / MariaDB | [docs/task-store-mysql.sql](docs/task-store-mysql.sql) |
   | SQL Server | [docs/task-store-sqlserver.sql](docs/task-store-sqlserver.sql) |
 
+- **记录保留**：`CompletedRetentionDays`（默认 **30**，`0` 表示不清理）天前**已结束**的任务
+  （`CompletedAt` 有值：`Succeeded` / `Failed` / `Canceled`）由 `AcsTaskWorker` 顺带清理，
+  执行间隔是 `RetentionSweepHours`（默认 1 小时，最小 1）。判定依据是任务的 `CompletedAt`，
+  **不是**入队时间；`Pending`（含"等设备上线"）和 `Running` 的任务永远不会被清理，
+  所以设备长期离线时任务会一直堆积，需要人工处理。
+  删除条数见日志"任务清理：已删除 N 条超过 X 天的已结束任务"，
+  生效值也可从启动日志"…已结束任务保留=…天"核对。
+
 > **切库提醒**：换到 MySQL / SQL Server 后，原 SQLite 文件里的任务历史不会自动迁移，
 > 未执行完的 `Pending` 任务建议先跑完再切。
 > **多实例**：`AcsTaskService.TakeDueAsync` 用数据库层的**条件更新**抢任务
@@ -368,6 +398,30 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
 与 OTAP 侧 `OTAP_CMS_ISAPIPassThrough` 等价。透传失败会尝试放大输出缓冲区（64KB → 256KB → 1MB）后重试。
 
 调试时的排查顺序：HTTP 响应体 `message` → `data.status.subStatusCode` → `data.rawResponse`（设备原始报文）→ 服务端日志中的 SDK 错误码。
+
+#### 门远程控制的报文格式（按设备型号切换）
+
+开门 / 关门 / 常开 / 常闭固定是 `PUT /ISAPI/AccessControl/RemoteControl/door/<doorNo>`，
+但**报文体格式随固件不同**，由 `ISUP:AccessControl:DoorControlFormat` 决定：
+
+| 取值 | 请求行 | 报文体 | 适用 |
+|---|---|---|---|
+| `Json`（代码默认） | `.../door/1?format=json` | `{"RemoteControlDoor":{"cmd":"open"}}` | 海康通用格式 |
+| `Xml` | `.../door/1`（不带 `format=json`） | `<RemoteControlDoor><cmd>open</cmd></RemoteControlDoor>` | DS-K1T670M 等只认 XML 的固件 |
+| `Auto` | 先发 JSON | 报文类错误时自动改发 XML | 型号混杂、不想逐台配 |
+
+现场实测（DS-K1T670M）：JSON 报文被设备回
+`statusCode=6 Invalid Content / subStatusCode=MessageParametersLack`（"the required node does not exist"），
+同样内容改用 XML 立即成功（`statusCode=1 OK`，`doorLockStatus` 由 `0` 变 `1`，关门后回到 `0`）。
+该机型对参数错误的区分可用于定位问题：XML + 非法 `cmd` 回 `badParameters`、不存在的门号回 `invalidID`。
+
+> 排查顺序：先看响应里的 `data.status.subStatusCode`。
+> `MessageParametersLack` / `badParameters` → 报文格式或节点不对；
+> `invalidID` → 门号错；`notSupport` → 该机型不支持这个接口
+> （例如 `GET /ISAPI/AccessControl/DoorStatus/<doorNo>` 在 DS-K1T670M 上不支持，
+> 改用 `GET /api/access-control/work-status` 的 `doorStatus` / `doorLockStatus`）。
+> `Auto` 只在报文类错误时重发 XML，SDK 层失败（`sdkSuccess=false`）不会重试，避免把一次真实动作重复下发。
+
 ## 6. 日志
 
 日志统一走 .NET 的 `ILogger`：

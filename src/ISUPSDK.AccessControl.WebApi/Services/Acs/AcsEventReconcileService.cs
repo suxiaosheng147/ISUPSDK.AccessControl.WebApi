@@ -28,6 +28,7 @@ public sealed class AcsEventReconcileService : BackgroundService
     private readonly AcsEventSpool _spool;
     private readonly AcsEventStore _store;
     private readonly IsapiDigestClient _digest;
+    private readonly AcsAlarmForwardService _forwarder;
     private readonly IsupTimeOptions _time;
     private readonly ILogger<AcsEventReconcileService> _logger;
 
@@ -58,6 +59,7 @@ public sealed class AcsEventReconcileService : BackgroundService
         AcsEventSpool spool,
         AcsEventStore store,
         IsapiDigestClient digest,
+        AcsAlarmForwardService forwarder,
         ILogger<AcsEventReconcileService> logger)
     {
         _options = options.Value;
@@ -67,6 +69,7 @@ public sealed class AcsEventReconcileService : BackgroundService
         _spool = spool;
         _store = store;
         _digest = digest;
+        _forwarder = forwarder;
         _logger = logger;
     }
 
@@ -567,6 +570,7 @@ public sealed class AcsEventReconcileService : BackgroundService
         var lastHasMore = false;
         var lastSummary = string.Empty;
         var lastEventTime = (DateTimeOffset?)null;
+        var pictureAttempts = 0;
 
         while (pages < maxPages && !ct.IsCancellationRequested)
         {
@@ -629,7 +633,19 @@ public sealed class AcsEventReconcileService : BackgroundService
             {
                 foreach (var info in infos)
                 {
-                    var evt = BuildReconcileEvent(device.DeviceId, info, "IsapiDigest");
+                    var (evt, pictureAttempted) = await BuildReconcileEventAsync(
+                            device.DeviceId,
+                            info,
+                            "IsapiDigest",
+                            allowPictureDownload: CanDownloadPicture(pictureAttempts),
+                            ct)
+                        .ConfigureAwait(false);
+
+                    if (pictureAttempted)
+                    {
+                        pictureAttempts++;
+                    }
+
                     if (_spool.TryAccept(evt))
                     {
                         accepted++;
@@ -689,6 +705,7 @@ public sealed class AcsEventReconcileService : BackgroundService
         var lastHasMore = false;
         var lastSummary = string.Empty;
         var lastEventTime = (DateTimeOffset?)null;
+        var pictureAttempts = 0;
 
         while (pages < maxPages && !ct.IsCancellationRequested)
         {
@@ -739,7 +756,19 @@ public sealed class AcsEventReconcileService : BackgroundService
             {
                 foreach (var info in infos)
                 {
-                    var evt = BuildReconcileEvent(device.DeviceId, info, "Reconcile");
+                    var (evt, pictureAttempted) = await BuildReconcileEventAsync(
+                            device.DeviceId,
+                            info,
+                            "Reconcile",
+                            allowPictureDownload: CanDownloadPicture(pictureAttempts),
+                            ct)
+                        .ConfigureAwait(false);
+
+                    if (pictureAttempted)
+                    {
+                        pictureAttempts++;
+                    }
+
                     if (_spool.TryAccept(evt))
                     {
                         accepted++;
@@ -964,14 +993,31 @@ public sealed class AcsEventReconcileService : BackgroundService
     }
 
     /// <summary>
-    /// 把设备返回的一条事件转成 <see cref="IsupAlarmEvent"/>；
+    /// 本轮还能不能再发起一次抓拍图下载（<c>MaxPictureDownloadsPerRun&lt;=0</c> 表示不限）。
+    /// 启动补历史（默认回看 60 天）时设备上的图多半已被覆盖，这里限流避免把设备打爆。
+    /// </summary>
+    private bool CanDownloadPicture(int attempts)
+        => _options.DownloadPictures &&
+           (_options.MaxPictureDownloadsPerRun <= 0 || attempts < _options.MaxPictureDownloadsPerRun);
+
+    /// <summary>
+    /// 把设备返回的一条事件转成 <see cref="IsupAlarmEvent"/>；报文带 <c>pictureURL</c>（人脸类门禁事件）时
+    /// 用 Digest 下载抓拍图落盘，文件名写进 <see cref="IsupAlarmEvent.PictureFileNames"/> ——
+    /// 入库后 <c>GET /api/events</c> 的 <c>pictures</c> / <c>pictureUrls</c> 才有值。
     /// <paramref name="source"/> 区分通道（<c>Reconcile</c> = SDK 透传对账，<c>IsapiDigest</c> = Digest 直连）。
     /// </summary>
-    private static IsupAlarmEvent BuildReconcileEvent(string deviceId, JsonElement info, string source)
+    /// <returns>事件本身，以及本次是否真的发起过图片下载（供单轮限流计数）。</returns>
+    private async Task<(IsupAlarmEvent Event, bool PictureAttempted)> BuildReconcileEventAsync(
+        string deviceId,
+        JsonElement info,
+        string source,
+        bool allowPictureDownload,
+        CancellationToken ct)
     {
         var payload = info.GetRawText();
         var major = ReadInt(info, "major");
         var minor = ReadInt(info, "minor");
+        var eventTime = ReadTime(info);
 
         var evt = new IsupAlarmEvent
         {
@@ -984,10 +1030,55 @@ public sealed class AcsEventReconcileService : BackgroundService
             SubEventType = minor?.ToString(),
             IsAccessControl = major == 5,   // 与 ISUP 回调、ISAPI 语义一致：majorEventType=5 才是门禁事件
             PayloadBytes = System.Text.Encoding.UTF8.GetByteCount(payload),
-            ReceivedAt = ReadTime(info) ?? DateTimeOffset.UtcNow,
+            ReceivedAt = eventTime ?? DateTimeOffset.UtcNow,
         };
 
-        return evt;
+        // 抓拍图：设备返回的 pictureURL 是设备本地地址（浏览器取不了，还得带 Digest 认证），
+        // 这里下载落盘，只把文件名写进入库事件，之后由 GET /api/events/pictures/{文件名} 提供。
+        if (!allowPictureDownload)
+        {
+            return (evt, false);
+        }
+
+        var pictureUrl = ReadString(info, "pictureURL") ?? ReadString(info, "pictureUrl");
+        if (string.IsNullOrWhiteSpace(pictureUrl))
+        {
+            return (evt, false);
+        }
+
+        var fileName = AcsEventPictureEnricher.BuildPictureFileName(
+            deviceId,
+            eventTime,
+            ReadString(info, "serialNo") ?? ReadString(info, "eventSerialNo"),
+            minor?.ToString(CultureInfo.InvariantCulture));
+
+        var saved = await _forwarder
+            .TryDownloadPictureFileAsync(deviceId, pictureUrl, fileName, ct)
+            .ConfigureAwait(false);
+
+        if (saved.FileName is { } savedName)
+        {
+            evt.PictureFileNames = [savedName];
+        }
+
+        return (evt, saved.Attempted);
+    }
+
+    private static string? ReadString(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var property))
+        {
+            return null;
+        }
+
+        var value = property.ValueKind switch
+        {
+            JsonValueKind.String => property.GetString(),
+            JsonValueKind.Number => property.ToString(),
+            _ => null,
+        };
+
+        return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static DateTimeOffset? ReadTime(JsonElement info)

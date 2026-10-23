@@ -1,7 +1,9 @@
 ﻿using ISUPSDK.AccessControl.WebApi.Interop;
 using ISUPSDK.AccessControl.WebApi.Models;
 using ISUPSDK.AccessControl.WebApi.Models.Isapi;
+using ISUPSDK.AccessControl.WebApi.Options;
 using ISUPSDK.AccessControl.WebApi.Services.Builders;
+using Microsoft.Extensions.Options;
 
 namespace ISUPSDK.AccessControl.WebApi.Services;
 
@@ -16,11 +18,16 @@ public sealed class IsupIsapiService
 
     private readonly IsupCmsService _cms;
     private readonly ILogger<IsupIsapiService> _logger;
+    private readonly AcsDoorControlFormat _doorControlFormat;
 
-    public IsupIsapiService(IsupCmsService cms, ILogger<IsupIsapiService> logger)
+    public IsupIsapiService(
+        IsupCmsService cms,
+        IOptions<IsupAccessControlOptions> accessControlOptions,
+        ILogger<IsupIsapiService> logger)
     {
         _cms = cms;
         _logger = logger;
+        _doorControlFormat = accessControlOptions.Value.ResolveDoorControlFormat();
     }
 
     // ==========================================================================================
@@ -900,27 +907,85 @@ public sealed class IsupIsapiService
     // ==========================================================================================
 
     /// <summary>
-    /// 门远程控制：<c>PUT /ISAPI/AccessControl/RemoteControl/door/&lt;doorNo&gt;?format=json</c>
-    /// 请求体：<c>{ "RemoteControlDoor": { "cmd": "open" } }</c>
+    /// 门远程控制，报文格式由 <c>ISUP:AccessControl:DoorControlFormat</c> 决定：
+    /// <list type="bullet">
+    /// <item><c>Json</c>（默认）：<c>PUT /ISAPI/AccessControl/RemoteControl/door/&lt;doorNo&gt;?format=json</c>，
+    /// 请求体 <c>{ "RemoteControlDoor": { "cmd": "open" } }</c>；</item>
+    /// <item><c>Xml</c>：同一路径但不带 <c>format=json</c>，
+    /// 请求体 <c>&lt;RemoteControlDoor&gt;&lt;cmd&gt;open&lt;/cmd&gt;&lt;/RemoteControlDoor&gt;</c>
+    /// （DS-K1T670M 等固件只认这种，收 JSON 会回 <c>MessageParametersLack</c>）；</item>
+    /// <item><c>Auto</c>：先发 JSON，设备以报文类错误拒绝时再发 XML。</item>
+    /// </list>
     /// </summary>
-    public Task<IsapiOperationResult> ControlDoorAsync(
+    public async Task<IsapiOperationResult> ControlDoorAsync(
         IsupDevice device,
         int doorNo,
         IsapiDoorCommand command,
         uint timeoutMs = 10000,
         CancellationToken ct = default)
     {
-        var body = new IsapiDoorControl
+        var cmd = ToCmdText(command);
+
+        if (_doorControlFormat != AcsDoorControlFormat.Xml)
         {
-            RemoteControlDoor = new IsapiDoorControlBody { Cmd = ToCmdText(command) },
+            var body = new IsapiDoorControl
+            {
+                RemoteControlDoor = new IsapiDoorControlBody { Cmd = cmd },
+            };
+
+            var jsonResult = await SendJsonWithBodyAsync(
+                device,
+                IsapiEndpoints.Put($"{IsapiEndpoints.DoorControl(doorNo)}?{JsonQuery}"),
+                body,
+                timeoutMs,
+                ct).ConfigureAwait(false);
+
+            if (_doorControlFormat != AcsDoorControlFormat.Auto || !ShouldRetryDoorControlAsXml(jsonResult))
+            {
+                return jsonResult;
+            }
+
+            _logger.LogInformation(
+                "门远程控制 JSON 报文被设备 {DeviceId} 拒绝（subStatusCode={SubStatusCode}，门={DoorNo}，cmd={Cmd}），按 DoorControlFormat=Auto 改用 XML 报文重试。",
+                device.DeviceId,
+                jsonResult.Status?.SubStatusCode,
+                doorNo,
+                cmd);
+        }
+
+        return await SendXmlDoorControlAsync(device, doorNo, cmd, timeoutMs, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>以 XML 报文下发门远程控制（请求行不带 <c>format=json</c>）。</summary>
+    private Task<IsapiOperationResult> SendXmlDoorControlAsync(
+        IsupDevice device,
+        int doorNo,
+        string cmd,
+        uint timeoutMs,
+        CancellationToken ct)
+    {
+        var request = new IsapiRawMessage
+        {
+            RequestUrl = IsapiEndpoints.Put(IsapiEndpoints.DoorControl(doorNo)),
+            Body = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><RemoteControlDoor><cmd>{cmd}</cmd></RemoteControlDoor>",
+            TimeoutMs = timeoutMs,
         };
 
-        return SendJsonWithBodyAsync(
-            device,
-            IsapiEndpoints.Put($"{IsapiEndpoints.DoorControl(doorNo)}?{JsonQuery}"),
-            body,
-            timeoutMs,
-            ct);
+        return SendCoreAsync(device, request, ct);
+    }
+
+    /// <summary>
+    /// 判断门控制的 JSON 失败是否属于"设备不认报文格式"（而非门号错、鉴权错、SDK 故障）。
+    /// 只有报文类错误才值得改用 XML 重试，避免把一次真实动作重复下发。
+    /// </summary>
+    private static bool ShouldRetryDoorControlAsXml(IsapiOperationResult result)
+    {
+        if (!result.SdkSuccess || result.DeviceSuccess)
+        {
+            return false;
+        }
+
+        return result.Status?.SubStatusCode is "MessageParametersLack" or "badParameters" or "notSupport";
     }
 
     /// <summary>门状态查询（GET /ISAPI/AccessControl/DoorStatus/&lt;doorNo&gt;）。</summary>

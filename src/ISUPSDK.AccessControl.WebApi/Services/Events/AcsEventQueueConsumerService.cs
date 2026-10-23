@@ -26,6 +26,7 @@ public sealed class AcsEventQueueConsumerService : BackgroundService
     private readonly IEventQueue _queue;
     private readonly AcsEventSpoolReplayer _replayer;
     private readonly AcsAlarmForwardService _forwarder;
+    private readonly AcsEventPictureEnricher _pictures;
     private readonly ILogger<AcsEventQueueConsumerService> _logger;
 
     private long _consumed;
@@ -46,6 +47,7 @@ public sealed class AcsEventQueueConsumerService : BackgroundService
         IEventQueue queue,
         AcsEventSpoolReplayer replayer,
         AcsAlarmForwardService forwarder,
+        AcsEventPictureEnricher pictures,
         ILogger<AcsEventQueueConsumerService> logger)
     {
         _options = options.Value;
@@ -53,6 +55,7 @@ public sealed class AcsEventQueueConsumerService : BackgroundService
         _queue = queue;
         _replayer = replayer;
         _forwarder = forwarder;
+        _pictures = pictures;
         _logger = logger;
     }
 
@@ -246,6 +249,12 @@ public sealed class AcsEventQueueConsumerService : BackgroundService
         {
             return;
         }
+
+        // 入库前补抓拍图：报文带 pictureURL 的设备事件在这里下载落盘，
+        // 文件名随事件入库 —— 之后 GET /api/events 的 pictures / pictureUrls 才有值（失败不影响入库）。
+        await _pictures
+            .EnrichAsync(valid.Select(message => message.Envelope.Event).ToList(), ct)
+            .ConfigureAwait(false);
 
         var result = await _store
             .AddBatchAsync(valid.Select(message => message.Envelope).ToList(), _queue.ProviderName, ct)

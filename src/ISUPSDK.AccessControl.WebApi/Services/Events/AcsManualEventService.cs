@@ -264,6 +264,7 @@ public sealed class AcsManualEventService
             PayloadBytes = Encoding.UTF8.GetByteCount(payload),
             IsAccessControl = request.IsAccessControl ?? true,
             PictureFileNames = request.PictureFileNames is { Count: > 0 } ? request.PictureFileNames : null,
+            PictureUrl = string.IsNullOrWhiteSpace(request.PictureUrl) ? null : request.PictureUrl.Trim(),
             ReceivedAt = eventTime,
         };
     }

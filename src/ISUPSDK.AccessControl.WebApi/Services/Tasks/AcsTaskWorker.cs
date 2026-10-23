@@ -46,12 +46,14 @@ public sealed class AcsTaskWorker : BackgroundService
         }
 
         _logger.LogInformation(
-            "下发任务队列已启动：库={Provider}，轮询={Poll}s，批量={Batch}，离线重试={Offline}s，临时错误重试上限={Max}。",
+            "下发任务队列已启动：库={Provider}，轮询={Poll}s，批量={Batch}，离线重试={Offline}s，临时错误重试上限={Max}，已结束任务保留={RetentionDays}天（每 {SweepHours} 小时清理）。",
             _options.Provider,
             _options.PollSeconds,
             _options.BatchSize,
             _options.OfflineRetrySeconds,
-            _options.MaxAttempts);
+            _options.MaxAttempts,
+            _options.CompletedRetentionDays,
+            Math.Clamp(_options.RetentionSweepHours, 1, 720));
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -172,7 +174,8 @@ public sealed class AcsTaskWorker : BackgroundService
             return;
         }
 
-        if (DateTimeOffset.UtcNow - _lastCleanup < TimeSpan.FromHours(1))
+        var interval = TimeSpan.FromHours(Math.Clamp(_options.RetentionSweepHours, 1, 720));
+        if (DateTimeOffset.UtcNow - _lastCleanup < interval)
         {
             return;
         }

@@ -38,6 +38,18 @@ public sealed class AcsEventReconcileOptions
     /// <summary>事件次类型（0=全部）。</summary>
     public int Minor { get; set; }
 
+    /// <summary>
+    /// 对账 / 高频轮询补的事件是否用 Digest 下载抓拍图（落盘后文件名随事件入库，
+    /// <c>GET /api/events</c> 的 <c>pictures</c> / <c>pictureUrls</c> 才有值）。
+    /// </summary>
+    public bool DownloadPictures { get; set; } = true;
+
+    /// <summary>
+    /// 单设备单轮最多发起多少次抓拍图下载（0=不限）。
+    /// 启动补历史（默认回看 60 天）时设备上的图多半已被循环覆盖，限流避免拖慢对账。
+    /// </summary>
+    public int MaxPictureDownloadsPerRun { get; set; } = 200;
+
     /// <summary>为空表示对所有在线 OTAP 设备对账；否则仅对列表内的设备 ID。</summary>
     public List<string> Devices { get; set; } = new();
 

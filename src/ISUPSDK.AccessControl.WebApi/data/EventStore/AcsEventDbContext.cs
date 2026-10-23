@@ -77,6 +77,9 @@ public sealed class AcsEventDbContext : DbContext
         evt.Property(e => e.Payload);
         evt.Property(e => e.PictureFileNames);
 
+        // 外部图片直链（SDK 报警回调的 PicDataUrl；图片服务器可直接访问，平台不下载）。
+        evt.Property(e => e.PictureUrl).HasMaxLength(512);
+
         evt.Property(e => e.EventTime).HasConversion(_dateTimeOffsetConverter).IsRequired();
         evt.Property(e => e.ReceivedAt).HasConversion(_dateTimeOffsetConverter).IsRequired();
         evt.Property(e => e.EnqueuedAt).HasConversion(_dateTimeOffsetConverter).IsRequired();

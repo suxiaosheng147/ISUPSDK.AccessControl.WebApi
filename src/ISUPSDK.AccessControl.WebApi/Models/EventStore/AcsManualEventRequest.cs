@@ -61,6 +61,9 @@ public sealed class AcsManualEventRequest
 
     /// <summary>关联的抓拍图片文件名（仅登记文件名，不上传文件）。</summary>
     public List<string>? PictureFileNames { get; set; }
+
+    /// <summary>外部图片直链（图片服务器可访问的完整 URL，平台不下载，仅随事件保存供前端显示）。</summary>
+    public string? PictureUrl { get; set; }
 }
 
 /// <summary>手工补录的处理结果。</summary>

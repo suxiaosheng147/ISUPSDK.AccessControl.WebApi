@@ -82,8 +82,14 @@ public sealed class AcsEventRecord
     /// <summary>报文中是否被截断（true 表示已超过 MaxPayloadBytes）。</summary>
     public bool PayloadTruncated { get; set; }
 
-    /// <summary>抓拍图片文件名列表（JSON 数组文本）。</summary>
+    /// <summary>抓拍图片文件名列表（JSON 数组文本；平台落盘的图，配 <c>GET /api/events/pictures/{文件名}</c>）。</summary>
     public string? PictureFileNames { get; set; }
+
+    /// <summary>
+    /// 外部图片直链（SDK 报警回调 <c>Params.PicDataUrl</c> 展开后的完整 URL）。
+    /// 图片服务器可直接访问，平台不下载；与 <see cref="PictureFileNames"/> 并存（二者至少有一个为空）。
+    /// </summary>
+    public string? PictureUrl { get; set; }
 
     /// <summary>是否属于门禁（AccessControl）事件。</summary>
     public bool IsAccessControl { get; set; }

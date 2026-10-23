@@ -82,6 +82,23 @@
     .tag.err { background: #fce8e6; color: var(--danger); }
     .tag.acs { background: #e8f0fe; color: var(--accent); }
 
+    .thumb {
+      width: 56px;
+      height: 42px;
+      object-fit: cover;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      display: block;
+    }
+    .thumbWrap { display: flex; align-items: center; gap: 4px; }
+    .gallery { display: flex; flex-wrap: wrap; gap: 10px; }
+    .gallery img {
+      max-width: 240px;
+      max-height: 240px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
     .pager { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
     .msg { margin-top: 10px; padding: 9px 12px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; }
     .msg.err { background: #fce8e6; color: #a50e0e; border: 1px solid #f5c2c0; }
@@ -238,6 +255,7 @@
             <th>认证方式</th>
             <th>来源</th>
             <th>门禁</th>
+            <th>抓拍图</th>
             <th>队列</th>
             <th>投递</th>
             <th>操作</th>
@@ -685,7 +703,7 @@
       page.limit = Math.min(Math.max(parseInt($('qLimit').value || '20', 10) || 20, 1), 1000);
 
       const body = $('eventsBody');
-      body.innerHTML = '<tr><td colspan="15" class="muted">查询中…</td></tr>';
+      body.innerHTML = '<tr><td colspan="16" class="muted">查询中…</td></tr>';
 
       try {
         const data = await api('/api/events?' + buildQuery().toString());
@@ -704,10 +722,24 @@
       }
     }
 
+    // 抓拍图：有 pictureUrls 时渲染缩略图（点击查看原图），无图时留空。
+    function pictureCell(e) {
+      const urls = e.pictureUrls || [];
+      if (!urls.length) {
+        return esc(EMPTY);
+      }
+
+      const more = urls.length > 1 ? '<span class="muted">+' + (urls.length - 1) + '</span>' : '';
+      return '<span class="thumbWrap">' +
+        '<a href="' + esc(urls[0]) + '" target="_blank" rel="noopener" title="共 ' + urls.length + ' 张抓拍图，点击查看原图">' +
+        '<img class="thumb" src="' + esc(urls[0]) + '" alt="抓拍图" loading="lazy">' +
+        '</a>' + more + '</span>';
+    }
+
     function renderRows() {
       const body = $('eventsBody');
       if (!page.items.length) {
-        body.innerHTML = '<tr><td colspan="15" class="muted">没有符合条件的记录</td></tr>';
+        body.innerHTML = '<tr><td colspan="16" class="muted">没有符合条件的记录</td></tr>';
         return;
       }
 
@@ -736,6 +768,7 @@
           '<td>' + esc(e.verifyMode ? (VERIFY_TEXT[e.verifyMode] || e.verifyMode) : EMPTY) + '</td>' +
           '<td>' + esc(text(e.source, SOURCE_TEXT)) + '</td>' +
           '<td>' + (e.isAccessControl ? '<span class="tag acs">门禁</span>' : '<span class="tag">其它</span>') + '</td>' +
+          '<td>' + pictureCell(e) + '</td>' +
           '<td>' + esc(text(e.queueProvider, PROVIDER_TEXT)) + '</td>' +
           '<td>' + esc(e.deliveryAttempts === null || e.deliveryAttempts === undefined ? EMPTY : e.deliveryAttempts) + '</td>' +
           '<td><button type="button" data-id="' + esc(e.id) + '">查看</button></td>' +
@@ -801,10 +834,21 @@
           payloadHtml = '<pre>' + esc(pretty) + '</pre>';
         }
 
+        // 抓拍图直接渲染成图片（点击在新窗口看原图），无图时不显示这一节。
+        const pictureUrls = e.pictureUrls || [];
+        const picturesHtml = pictureUrls.length
+          ? '<h2 style="margin:16px 0 8px">抓拍图（共 ' + pictureUrls.length + ' 张）</h2><div class="gallery">' +
+            pictureUrls.map(function (url, index) {
+              return '<a href="' + esc(url) + '" target="_blank" rel="noopener" title="点击查看原图">' +
+                '<img src="' + esc(url) + '" alt="抓拍图 ' + (index + 1) + '" loading="lazy"></a>';
+            }).join('') + '</div>'
+          : '';
+
         $('modalBody').innerHTML =
           '<div class="kv">' + kv.map(function (item) {
             return '<div class="k">' + esc(item[0]) + '</div><div>' + esc(item[1] === null || item[1] === undefined || item[1] === '' ? EMPTY : item[1]) + '</div>';
           }).join('') + '</div>' +
+          picturesHtml +
           '<h2 style="margin:16px 0 8px">报文原文</h2>' + payloadHtml;
 
         $('modal').classList.remove('hidden');

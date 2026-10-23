@@ -169,5 +169,22 @@ public sealed class AcsEventQueueOptions
 
         /// <summary>重放时最多回看的落盘文件天数（0 表示全部）。</summary>
         public int ReplaySpoolDays { get; set; } = 2;
+
+        /// <summary>
+        /// 入库前是否解析事件里的抓拍图（让 <c>GET /api/events</c> 的 <c>pictures</c> / <c>pictureUrls</c> 有值）。
+        /// <list type="bullet">
+        /// <item>ISAPI JSON 报文带 <c>pictureURL</c>（Digest 直连 / 对账 / 推送）→ 设备本地地址、要 Digest 认证，
+        /// 平台下载落盘（还要求 <c>ISUP:IsapiDigest:DownloadPictures=true</c>）；</item>
+        /// <item>SDK 报警回调的 PPVSPMessage XML → <c>Params.PicDataUrl</c> 可直接访问、<b>不下载</b>，
+        /// 只把展开后的完整 URL 存进事件的 <c>PictureUrl</c>（与转发用的 <c>Settings:IsDownloadPic</c> 无关）。</item>
+        /// </list>
+        /// 失败只记日志，不影响入库。
+        /// </summary>
+        public bool DownloadPictures { get; set; } = true;
+
+        /// <summary>
+        /// 单批最多下载多少张抓拍图（0 = 不限）。一批可能有上百条事件，限流避免同时向设备发起大量取图请求。
+        /// </summary>
+        public int MaxPictureDownloadsPerBatch { get; set; } = 50;
     }
 }

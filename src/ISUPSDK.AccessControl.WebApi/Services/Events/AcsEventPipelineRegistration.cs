@@ -41,6 +41,10 @@ public static class AcsEventPipelineRegistration
         // （Settings:MessageQueueAddress）——生产端（SDK 报警回调）不做判定、不直接发送。
         services.AddSingleton<AcsAlarmForwardService>();
 
+        // 入库前补抓拍图：报文带 pictureURL 时用 Digest 下载落盘，文件名随事件入库
+        // （GET /api/events 的 pictures / pictureUrls 才有值）。
+        services.AddSingleton<AcsEventPictureEnricher>();
+
         // 手工补录（POST /api/events/manual）：走 spool + 队列，或直接入库。
         services.AddSingleton<AcsManualEventService>();
 

@@ -33,11 +33,13 @@ public sealed class IsapiDigestOptions
     public string PictureDirectory { get; set; } = string.Empty;
 
     /// <summary>
-    /// 抓拍图对外 URL 前缀（转发报文里 <c>ExtEventPictureURL</c> 用平台地址，不用设备地址）。
+    /// 抓拍图对外 URL 前缀（转发报文里 <c>ExtEventPictureURL</c> 与事件查询的 <c>pictureUrls</c> 都用它）。
     /// <para>
-    /// 留空时自动推导为 <c>http://{Settings:ServerAddress}:{Kestrel 监听端口}/api/events/pictures</c>；
-    /// 也可以显式写成 <c>https://acs.example.com/acs-pictures</c>（末尾不要带 /）以适配反代/域名。
+    /// 这里是<b>唯一</b>来源，不再按 <c>Settings:ServerAddress</c> 推导（那个地址通常是设备网段的内网 IP，
+    /// 浏览器不一定能访问）。配成 <c>http://10.0.0.5:5190/api/events/pictures</c>；
+    /// 反代 / 域名场景写 <c>https://acs.example.com/acs-pictures</c>（末尾不要带 <c>/</c>）。
     /// </para>
+    /// <para>留空时用相对路径 <c>/api/events/pictures</c>：前端按页面同源解析，可直接显示图片。</para>
     /// </summary>
     public string PictureUrlPrefix { get; set; } = string.Empty;
 

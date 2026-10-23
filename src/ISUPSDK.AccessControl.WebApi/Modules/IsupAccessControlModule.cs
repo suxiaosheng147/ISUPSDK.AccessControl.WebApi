@@ -28,6 +28,8 @@ public static class IsupAccessControlModule
         // ---- 设备访问层：设备表 + ISAPI 透传 ----
         // 报文发往设备的通道（执行 HTTP 请求 / PTXML 透传）按设备编号切换，配置节：ISUP:IsapiChannel。
         builder.Services.Configure<IsapiChannelOptions>(builder.Configuration.GetSection(IsapiChannelOptions.SectionName));
+        // 门禁业务行为（门远程控制报文格式 Json/Xml/Auto），配置节：ISUP:AccessControl。
+        builder.Services.Configure<IsupAccessControlOptions>(builder.Configuration.GetSection(IsupAccessControlOptions.SectionName));
         builder.Services.AddSingleton<IsupCmsService>();
         // ---- ISAPI 业务服务：人员/卡片/人脸/计划模板/门禁控制的报文组装 ----
         builder.Services.AddSingleton<IsupIsapiService>();

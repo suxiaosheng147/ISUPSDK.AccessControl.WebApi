@@ -53,8 +53,14 @@ public sealed class AcsTaskQueueOptions
     /// <summary>临时性错误（网络/SDK 超时）的最大重试次数。</summary>
     public int MaxAttempts { get; set; } = 3;
 
-    /// <summary>已完成任务的保留天数（0 表示不自动清理）。</summary>
-    public int CompletedRetentionDays { get; set; } = 7;
+    /// <summary>
+    /// 已结束任务（<c>CompletedAt</c> 有值：<c>Succeeded</c> / <c>Failed</c> / <c>Canceled</c>）的保留天数；
+    /// 0 表示不自动清理。<c>Pending</c> / <c>Running</c> 的任务永远不清理。
+    /// </summary>
+    public int CompletedRetentionDays { get; set; } = 30;
+
+    /// <summary>任务清理的执行间隔（小时）；最小按 1 小时执行，避免过于频繁地扫库。</summary>
+    public int RetentionSweepHours { get; set; } = 1;
 
     /// <summary>人脸图片等二进制附件存放目录。</summary>
     public string BinaryDirectory { get; set; } = "./storage/task-files/";

@@ -61,8 +61,15 @@ public sealed class IsupAlarmEvent
     /// <summary>报文格式：json / xml / struct / binary。</summary>
     public string PayloadFormat { get; set; } = "json";
 
-    /// <summary>报警附带图片的文件名列表。</summary>
+    /// <summary>报警附带图片的文件名列表（平台落盘的抓拍图，配合 <c>GET /api/events/pictures/{文件名}</c>）。</summary>
     public List<string>? PictureFileNames { get; set; }
+
+    /// <summary>
+    /// 报警报文自带的外部图片直链（SDK 报警回调的 <c>Params.PicDataUrl</c> 展开后的完整 URL）。
+    /// 图片服务器可直接访问，<b>不需要</b>平台下载（与 ISAPI Digest 的 <c>pictureURL</c> 不同）；
+    /// 入库后随事件返回，前端可直接用作 <c>&lt;img src&gt;</c>。
+    /// </summary>
+    public string? PictureUrl { get; set; }
 
     /// <summary>异常回调时的错误码。</summary>
     public uint? ErrorCode { get; set; }
