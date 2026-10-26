@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Xml.Serialization;
 using ISUPSDK.AccessControl.WebApi.Models;
@@ -126,12 +128,20 @@ public sealed class AcsEventPictureEnricher
             return await EnrichFromXmlAsync(evt).ConfigureAwait(false);
         }
 
-        if (!TryReadPictureUrl(evt.Payload, out var pictureUrl, out var eventTime, out var serial))
+        if (!TryReadPictureUrl(
+                evt.Payload,
+                out var pictureUrl,
+                out var eventTime,
+                out var serial,
+                out var employeeNo))
         {
             return false;
         }
 
-        var fileName = BuildPictureFileName(evt.DeviceId, eventTime, serial, evt.SubEventType);
+        // 文件名与对账 / 转发链路共用同一套规则（序号 → 人员编号 → 报文指纹），
+        // 才能命中已落盘的图、不重复下载。
+        var fileName = BuildPictureFileName(
+            evt.DeviceId, eventTime, serial, evt.SubEventType, employeeNo, evt.Payload);
         var saved = await _forwarder
             .TryDownloadPictureFileAsync(evt.DeviceId, pictureUrl, fileName, ct)
             .ConfigureAwait(false);
@@ -258,11 +268,13 @@ public sealed class AcsEventPictureEnricher
         string payload,
         out string pictureUrl,
         out DateTimeOffset? eventTime,
-        out string? serial)
+        out string? serial,
+        out string? employeeNo)
     {
         pictureUrl = string.Empty;
         eventTime = null;
         serial = null;
+        employeeNo = null;
 
         JsonDocument document;
         try
@@ -301,28 +313,74 @@ public sealed class AcsEventPictureEnricher
             pictureUrl = url;
             eventTime = ReadTime(container);
             serial = ReadString(container, "serialNo") ?? ReadString(container, "eventSerialNo");
+            employeeNo = ReadString(container, "employeeNoString");
 
             return true;
         }
     }
 
     /// <summary>
-    /// 抓拍图落盘文件名：<c>{设备序号}_{事件时间}_{事件序号}.jpeg</c>。
-    /// 同一事件在不同链路（对账 / 轮询 / 推送）算出的名字一致，因此重复处理时命中已落盘的图，不重复下载。
+    /// 抓拍图落盘文件名：<c>{设备序号}_{事件时间}_{token}.jpeg</c>。
+    /// <para>
+    /// token 优先级：<b>事件序号</b>（<c>serialNo</c> / <c>eventSerialNo</c>）→ <b>人员编号</b>
+    /// （<c>employeeNoString</c>）→ <b>报文指纹</b>（SHA-256 前 4 字节）→ 次类型（<c>minor</c>）→ <c>0</c>。
+    /// 用人员编号 / 报文指纹替代"只看 minor"，是为了避免同一设备同一秒的多条事件（批量刷脸）
+    /// 算出同一个名字、进而复用别人的照片。
+    /// </para>
+    /// <para>
+    /// 同一事件在不同链路（对账 / 高频轮询 / 消费者补图 / 转发）算出的名字必须一致，
+    /// 因此四处都要传同一份报文与相同的 serial / employeeNo —— 名字一致才能命中已落盘的文件、不重复下载。
+    /// </para>
     /// </summary>
+    /// <param name="deviceId">设备编号。</param>
+    /// <param name="eventTime">事件时间（报文里的 <c>time</c>）。</param>
+    /// <param name="serial">事件序号（<c>serialNo</c> / <c>eventSerialNo</c>）。</param>
+    /// <param name="minor">次类型，仅在序号 / 人员编号 / 报文都缺失时兜底。</param>
+    /// <param name="employeeNo">人员编号（<c>employeeNoString</c>）。</param>
+    /// <param name="payload">事件原始报文（用来算指纹，通常都能给出）。</param>
     public static string BuildPictureFileName(
         string deviceId,
         DateTimeOffset? eventTime,
         string? serial,
-        string? minor)
+        string? minor,
+        string? employeeNo = null,
+        string? payload = null)
     {
         var time = (eventTime ?? DateTimeOffset.UtcNow).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-        var token = !string.IsNullOrWhiteSpace(serial)
-            ? serial
-            : !string.IsNullOrWhiteSpace(minor) ? minor : "0";
+        var token = BuildPictureToken(serial, employeeNo, payload, minor);
 
         return $"{SanitizeFileToken(deviceId)}_{time}_{SanitizeFileToken(token)}.jpeg";
     }
+
+    /// <summary>文件名里的唯一 token：序号 → 人员编号 → 报文指纹 → 次类型 → <c>0</c>。</summary>
+    private static string BuildPictureToken(string? serial, string? employeeNo, string? payload, string? minor)
+    {
+        if (!string.IsNullOrWhiteSpace(serial))
+        {
+            return serial;
+        }
+
+        if (!string.IsNullOrWhiteSpace(employeeNo))
+        {
+            return employeeNo;
+        }
+
+        if (!string.IsNullOrWhiteSpace(payload))
+        {
+            return BuildPayloadToken(payload);
+        }
+
+        return !string.IsNullOrWhiteSpace(minor) ? minor : "0";
+    }
+
+    /// <summary>
+    /// 报文指纹：SHA-256 前 4 字节（8 位小写十六进制）。
+    /// 同一事件在不同链路拿到的是同一份报文文本，指纹相同 → 仍能命中已落盘的文件；
+    /// 不同事件（哪怕同设备同秒同 minor）指纹不同 → 不会互相复用照片。
+    /// </summary>
+    private static string BuildPayloadToken(string payload)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)).AsSpan(0, 4))
+            .ToLowerInvariant();
 
     /// <summary>文件名片段清洗：只保留字母 / 数字 / <c>-</c> / <c>_</c>，其余替换成 <c>_</c>（防路径穿越）。</summary>
     internal static string SanitizeFileToken(string? token)

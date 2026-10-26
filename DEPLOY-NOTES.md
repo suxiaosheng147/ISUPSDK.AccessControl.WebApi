@@ -25,7 +25,7 @@
 | 托管模式 | `web.config` → `hostingModel="inprocess"`（应用进程 = `w3wp.exe`） |
 | 端口 | `7823`（IIS 站点，由 HTTP.sys 监听）；`7660`（`Settings:InitPort`，CMS 设备注册）、`8081`（ESS 图片存储监听）**由 w3wp 进程持有**；`8083`（`ACSHttpPush:ListenPort`，默认 `Enabled=false`） |
 | 进程内后台服务 | `IsupSdkHostedService`、`SyncDevicesCronJob`（`*/1 * * * *`）、`DeviceTimeCronJob`（`*/30 * * * *`）、`IsapiDigestPollService`（默认 60s）、`AcsEventPublishWorker`、`AcsEventQueueConsumerService`、`AcsEventReconcileService`、`EventStoreRetentionService`、`AcsTaskWorker`、`IsupEventIngestService` |
-| 落盘目录（相对站点目录） | `storage\acs-events.db`、`storage\acs-tasks.db`（+`-shm`/`-wal`）、`logs\acs-push\spool`、`logs\log\log_YYYYMMDD\Isup.log`、`logs\isupsdk\*`、`IsapiDigest\PictureDirectory`、`logs\stdout_*.log` |
+| 落盘目录（相对站点目录） | `storage\acs-events.db`、`storage\acs-tasks.db`（+`-shm`/`-wal`）、`logs\acs-push\spool`、`logs\log\<yyyy-MM-dd>\app.log`（宿主）、`logs\log\<类名>\<yyyy-MM-dd>\<HH>.log`（业务）、`logs\isupsdk\*`、`IsapiDigest\PictureDirectory` |
 | 权限 | 站点目录未显式授权 `IIS AppPool\<池名>`；实际可写是靠 `E:\` 根对 `NT AUTHORITY\Authenticated Users` 的 **Modify** 继承来的 |
 
 ---
@@ -121,7 +121,8 @@ Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 7660,8081,7
 - SDK 原生库（`HCISUPCMS.dll` / `HCISUPAlarm.dll` / `HCISUPSS.dll` / `HCISUPStream.dll` 及 `HCNetUtils.dll`、`libeay32.dll`、`ssleay32.dll`）不参与编译引用，靠 `Interop/NativeLibraryResolver` 在运行时定位；
   `appsettings.json` 的 `ISUP:NativeDirectory` 当前为空 → 走"自动查找含 `HCISUPCMS.dll`+`HCISUPAlarm.dll` 的目录"，当前站点目录内已随发布带上，**换机器/换目录时要保证这堆 dll 与 exe 同目录或在 `NativeDirectory` 指明**。
 - `web.config` 会随发布覆盖站点上的同名文件，**注意两份文件的差异**：
-  源码里 `stdoutLogEnabled="true"`（便于排查"是不是又冷启动了"，每次启动生成一个 `logs\stdout_<UTC时间>_<pid>.log`，不滚动；确认稳定后可改 `false`）；
+  源码里 `stdoutLogEnabled="false"`（**不再生成** `logs\stdout_<UTC时间>_<pid>.log`：进程日志统一由 NLog 写 `logs\log\<yyyy-MM-dd>\app.log`；
+  确需抓 ANCM 级输出时才改回 `true` 并补 `stdoutLogFile=".\logs\stdout"`）；
   源码已含 `applicationInitialization`（预热）与 `shutdownTimeLimit="60"`，覆盖过去是期望行为——但**别用旧备份把这两段覆盖回去**。
 - 覆盖 dll 会触发应用池回收 → SDK 断连重建，尽量安排在低峰。
 - 站点目录是 git 仓库同名目录（`*.git`），注意别让发布产物和源码仓库混在一起。
@@ -170,19 +171,24 @@ Swagger 无环境开关（`IsupApiModule` 里无条件 `UseSwagger`，根路径 
 
 ## 9. 日志与排障入口
 
+日志框架是 **NLog**（站点目录下的 `nlog.config`；改完需重启进程/回收应用池生效，NLog 6 不再内置配置文件监视）：
+
 | 日志 | 位置 | 用途 |
 |---|---|---|
-| 应用日志 | `logs\log\log_YYYYMMDD\Isup.log` | 业务/设备/SDK 回调统一日志 |
-| stdout | `logs\stdout_<UTC时间>_<pid>.log` | ANCM 重定向；**进程每重启一次多一个文件**，靠它判断"是不是又冷启动了" |
-| SDK 原生日志 | `logs\isupsdk\*.log` | 排查 SDK 层失败 |
+| 宿主日志 | `logs\log\<yyyy-MM-dd>\app.log` | 启动/请求/EF Core/SDK 回调，按天一个文件（NLog 汇总） |
+| 业务日志 | `logs\log\<类名>\<yyyy-MM-dd>\<HH>.log` | 原 `Common.WriteFile*`：一个类一个目录、每小时一个文件 |
+| SDK 原生日志 | `logs\isupsdk\*.log` | 排查 SDK 层失败（`ISUP:SdkLogDirectory`，不受 NLog 管辖） |
 | 未转发事件 | `logs\acs-push\spool\acs-events-YYYYMMDD.jsonl` | 转发失败/进程中断时的兜底落盘 |
 | IIS 访问日志 | `C:\inetpub\logs\LogFiles\W3SVC4`（站点 id=4） | 判断"多久没有请求" |
 
-判断是否发生空闲回收：
+`logs\stdout_*.log` 已不再产生（`web.config` 的 `stdoutLogEnabled=false`）；排查冷启动/回收改看 `app.log`
+里的 `Application started` 与 w3wp 的创建时间：
 
 ```powershell
-Get-ChildItem 'E:\ISUPSDK.AccessControl.WebApi\logs' -Filter 'stdout_*.log' |
-  Sort-Object LastWriteTime | Select-Object -Last 5 Name,LastWriteTime
+# 每次进程启动都会在 app.log 里留下一条 "Application started"
+Get-ChildItem 'E:\ISUPSDK.AccessControl.WebApi\logs\log' -Recurse -Filter app.log |
+  Select-String -Pattern 'Application started' |
+  Sort-Object Line | Select-Object -Last 5 Line
 (Get-CimInstance Win32_Process -Filter "Name='w3wp.exe'").CreationDate
 ```
 
@@ -253,7 +259,7 @@ $p.startMode
 
 1. `Invoke-RestMethod http://127.0.0.1:7823/health` 正常；
 2. `netstat -ano | findstr :7660` 的 PID 指向 w3wp，且**保持同一 PID 超过 40 分钟**（跨越原 20 分钟门槛）；
-3. 期间不产生新的 `logs\stdout_*.log`；
+3. 期间 `logs\log\<yyyy-MM-dd>\app.log` 里不新增 `Application started`（进程没被回收），也不产生 `logs\stdout_*.log`；
 4. 设备侧在线状态不掉线。
 
 ### 10.3 操作风险（2026-10-23 本机实测，务必看）
@@ -265,7 +271,7 @@ $p.startMode
 - 所以：**改 IIS 配置（含本脚本 `-Apply`）安排在业务低峰**，改完立刻核对：
   `site=Started` / `pool=Started` / `serverAutoStart=true` / `7660`+`8081` 由 w3wp 持有 / `/health=healthy` 且设备重新上线。
 - `iis-apppool.ps1` **不加 `-Apply` 就是只读**，随时可以跑；
-  查"是不是又被回收了"看 System 日志里的 `WAS 5078 / 5009` 事件 + `logs\stdout_*.log` 是否新增。
+  查"是不是又被回收了"看 System 日志里的 `WAS 5078 / 5009` 事件 + `logs\log\<yyyy-MM-dd>\app.log` 是否新增 `Application started`。
 
 ---
 

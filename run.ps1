@@ -71,7 +71,8 @@ function Show-Status {
     }
 
     Write-Host ('        swagger: ' + $BaseUrl + '/swagger')
-    Write-Host ('        log    : ' + $OutLog)
+    Write-Host ('        log    : ' + (Join-Path (Split-Path $ExePath) 'logs\log') + '  (NLog: <日期>\app.log、<类名>\<日期>\<HH>.log)')
+    Write-Host ('        stdout : ' + $OutLog)
 }
 
 function Stop-Api {

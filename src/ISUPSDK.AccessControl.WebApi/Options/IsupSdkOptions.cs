@@ -26,6 +26,10 @@ public sealed class IsupSdkOptions
     /// <summary>离线设备记录保留天数（设备表清理；&lt;=0 表示不清理，默认 7 天）。</summary>
     public int DeviceOfflineRetentionDays { get; set; } = 7;
 
-    /// <summary>业务日志根目录（Common.WriteFile / Common.WriteFileHours 使用）。</summary>
+    /// <summary>
+    /// 日志根目录（NLog 落盘位置）：业务日志
+    /// <c>&lt;LogDirectory&gt;/log/&lt;类名&gt;/&lt;yyyy-MM-dd&gt;/&lt;HH&gt;.log</c>，
+    /// 宿主日志 <c>&lt;LogDirectory&gt;/log/&lt;yyyy-MM-dd&gt;/app.log</c>；相对路径按程序目录解析。
+    /// </summary>
     public string LogDirectory { get; set; } = "./logs/";
 }

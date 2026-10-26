@@ -8,6 +8,10 @@
 // ---------------------------------------------------------------------------------------------
 var builder = WebApplication.CreateBuilder(args);
 
+// 日志模块：整个进程只走 NLog（nlog.config：控制台 + logs\log\<类名>\<yyyy-MM-dd>\<HH>.log）。
+// 内部会 ClearProviders() 掉内置 Console/Debug provider，所以必须在其他 Add* 之前调用。
+builder.AddIsupNLog();
+
 // 设备接入模块：ISUP SDK 配置、运行时、后台初始化（CMS 监听 / 报警 / 图片存储 / 定时任务）。
 builder.AddIsupSdk();
 
@@ -20,7 +24,10 @@ builder.AddIsupApi();
 
 var app = builder.Build();
 
-// 接入统一日志门面：此后 Common.WriteFile* 与 SDK 回调日志都进入 ILogger。
+// NLog 接入请求管道（请求上下文 / 停机 flush）。
+app.UseIsupNLog();
+
+// 接入统一日志门面：此后 Common.WriteFile* 与 SDK 回调日志都进入 ILogger（出口即 NLog）。
 app.UseIsupSdk();
 
 // 任务库 / 事件库建表（轻量场景直接用 EnsureCreated）。

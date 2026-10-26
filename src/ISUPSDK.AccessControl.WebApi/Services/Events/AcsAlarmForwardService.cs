@@ -28,10 +28,12 @@ namespace ISUPSDK.AccessControl.WebApi.Services.Events;
 /// <c>0x4b</c>/<c>0x3c</c> 必须带有效图片（<c>PicDataUrl</c> 非空且不是
 /// <c>Failed-to-upload-picture</c>）才转发，<c>0x5</c>/<c>0x1</c> 无条件转发，
 /// 其余 MinorType 跳过（照常入库，不外发）；</item>
-/// <item><b>ISAPI JSON</b>（历史对账补漏 / HTTP 推送）：报文里<b>没有图片信息</b>，采用"无图降级"——
-/// 白名单内的 <c>minor</c> 一律转发（<c>1</c>→<c>0x1</c>、<c>5</c>→<c>0x5</c>、<c>75</c>→<c>0x4b</c>、<c>60</c>→<c>0x3c</c>），
-/// 转发报文的图片字段留空，人脸类仍按人脸事件码（196893）上报。
-/// 这样"回调丢失、由对账补进库"的刷卡/人脸事件也能补发给下游。</item>
+/// <item><b>ISAPI JSON</b>（历史对账补漏 / Digest 直连 / HTTP 推送）：白名单内的 <c>minor</c> 一律转发
+/// （<c>1</c>→<c>0x1</c>、<c>5</c>→<c>0x5</c>、<c>75</c>→<c>0x4b</c>、<c>60</c>→<c>0x3c</c>），
+/// 图片<b>优先复用</b>入库链路（对账 / 高频轮询 / 消费者补图）已落盘的抓拍图
+/// （<see cref="IsupAlarmEvent.PictureFileNames"/>），平台还没有图时才按报文里的 <c>pictureURL</c>
+/// 用 Digest 下载；两者都拿不到时图片字段留空，人脸类仍按人脸事件码（196893）上报。
+/// 这样"回调丢失、由对账补进库"的刷卡/人脸事件也能补发给下游，且不会为了同一张图重复打设备。</item>
 /// </list>
 /// </summary>
 public sealed class AcsAlarmForwardService
@@ -219,7 +221,7 @@ public sealed class AcsAlarmForwardService
             return AcsAlarmForwardResult.Skipped($"ISAPI JSON 事件：{skipReason}");
         }
 
-        await SendIsapiEventAsync(evt.DeviceId, isapi, minorHex!, ct).ConfigureAwait(false);
+        await SendIsapiEventAsync(evt, isapi, minorHex!, ct).ConfigureAwait(false);
 
         return AcsAlarmForwardResult.Forwarded(
             $"ISAPI JSON：minor={isapi.Minor}，DeviceID={evt.DeviceId}");
@@ -385,12 +387,14 @@ public sealed class AcsAlarmForwardService
 
     /// <summary>
     /// 组装并发送一条来自 ISAPI JSON 事件报文的下游消息。
-    /// 若报文带 <c>pictureURL</c>（Digest 直连的人脸事件），用 Digest 下载抓拍图后
-    /// 同时给出原始 URL 与本地路径；下载失败或未开启下载时只保留 URL（无图降级）。
+    /// 抓拍图<b>优先复用</b>入库链路（对账 / 高频轮询 / 消费者补图）已经落盘的文件
+    /// （<see cref="IsupAlarmEvent.PictureFileNames"/>），只有平台还没有图时才用 Digest 下载；
+    /// 两条路径都拿不到时图片字段留空（无图降级）。
     /// </summary>
-    private async Task SendIsapiEventAsync(string deviceId, IsapiEventInfo info, string minorHex, CancellationToken ct)
+    private async Task SendIsapiEventAsync(IsupAlarmEvent evt, IsapiEventInfo info, string minorHex, CancellationToken ct)
     {
         var settings = _runtime.CurrentSettings;
+        var deviceId = evt.DeviceId;
         var shuaTime = ParseEventTime(info.Time);
         var (userId, userType) = ResolvePerson(info.EmployeeNo);
 
@@ -399,21 +403,8 @@ public sealed class AcsAlarmForwardService
         var eventType = PictureMinorTypes.Contains(minorHex) ? "196893" : "198914";
 
         // 抓拍图：Digest 报文里的 pictureURL 是设备本地地址（下游取不了，还得带 Digest 认证），
-        // 这里用 Digest 下载并落盘，报文里的 URL 换成平台自己的图片接口地址。
-        var pictureUrl = string.Empty;
-        var picturePath = string.Empty;
-
-        if (!string.IsNullOrWhiteSpace(info.PictureUrl) && _digest.DownloadPictures)
-        {
-            var downloaded = await TryDownloadAlarmPictureAsync(
-                deviceId, info.PictureUrl, shuaTime, userType, userId, ct).ConfigureAwait(false);
-
-            if (downloaded is { } picture)
-            {
-                pictureUrl = picture.Url;
-                picturePath = picture.FilePath;
-            }
-        }
+        // 报文里给出的是平台自己的图片接口地址（复用入库已落盘的图，必要时才下载）。
+        var picture = await ResolveAlarmPictureAsync(evt, info, ct).ConfigureAwait(false);
 
         AlarmEvent events = new()
         {
@@ -427,11 +418,11 @@ public sealed class AcsAlarmForwardService
             {
                 ExtEventCardNo = info.CardNo ?? string.Empty,
                 ExtEventInOut = 0,
-                ExtEventPictureURL = pictureUrl,
+                ExtEventPictureURL = picture?.Url ?? string.Empty,
                 ExtEventPersonNo = userId.ToString(),
                 UserType = userType,
                 Time = shuaTime,
-                ExtEventPicture = picturePath
+                ExtEventPicture = picture?.FilePath ?? string.Empty
             }
         };
 
@@ -439,6 +430,37 @@ public sealed class AcsAlarmForwardService
 
         using MessageQueue mq = MessageQueueHepler.Create(settings.MessageQueueAddress);
         mq.Send(json);
+    }
+
+    /// <summary>
+    /// 取转发报文要用的抓拍图：<b>先复用</b>入库链路落盘的文件，没有再按 Digest 下载。
+    /// 两条路径的文件名都由 <see cref="AcsEventPictureEnricher.BuildPictureFileName"/> 生成，
+    /// 因此重复处理同一事件时必然命中已落盘文件，不会向设备重复取图
+    /// （对账补历史时设备上的图往往已被覆盖，重下只会失败 → 报文里空 URL）。
+    /// </summary>
+    private async Task<DownloadedPicture?> ResolveAlarmPictureAsync(
+        IsupAlarmEvent evt,
+        IsapiEventInfo info,
+        CancellationToken ct)
+    {
+        if (evt.PictureFileNames is { Count: > 0 } names && IsSafePictureFileName(names[0]))
+        {
+            var fileName = names[0];
+            var path = ResolvePictureFile(fileName);
+
+            // 图片被人工清理 / 换机导致文件不在时，继续走下面的下载兜底。
+            if (path is not null && File.Exists(path))
+            {
+                return new DownloadedPicture(path, $"{ResolvePictureUrlPrefix()}/{fileName}");
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(info.PictureUrl) || !_digest.DownloadPictures)
+        {
+            return null;
+        }
+
+        return await TryDownloadAlarmPictureAsync(evt, info, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -497,24 +519,32 @@ public sealed class AcsAlarmForwardService
     /// <summary>
     /// 用 Digest 下载抓拍图并落盘；成功返回"本地绝对路径 + 平台对外 URL"，
     /// 失败返回 null（调用方留空，不发设备地址）。
+    /// <para>
+    /// 文件名与入库链路共用 <see cref="AcsEventPictureEnricher.BuildPictureFileName"/>
+    /// （<c>{设备}_{事件时间}_{序号|人员编号|报文指纹}.jpeg</c>），不再拼 <c>userType_userId</c>：
+    /// 后者在报文缺 <c>employeeNoString</c> 时会退化成 <c>_0_0</c>，
+    /// 同设备同一秒的多条事件会撞名并复用别人的照片。
+    /// </para>
     /// </summary>
     private async Task<DownloadedPicture?> TryDownloadAlarmPictureAsync(
-        string deviceId,
-        string pictureUrl,
-        DateTime eventTime,
-        int userType,
-        int userId,
+        IsupAlarmEvent evt,
+        IsapiEventInfo info,
         CancellationToken ct)
     {
-        var fileName = new StringBuilder(128)
-            .Append(deviceId)
-            .Append('_')
-            .Append(eventTime.ToString("yyyyMMddHHmmss"))
-            .Append('_').Append(userType).Append('_')
-            .Append(userId).Append(".jpeg")
-            .ToString();
+        if (string.IsNullOrWhiteSpace(info.PictureUrl))
+        {
+            return null;
+        }
 
-        var saved = await TryDownloadPictureFileAsync(deviceId, pictureUrl, fileName, ct).ConfigureAwait(false);
+        var fileName = AcsEventPictureEnricher.BuildPictureFileName(
+            evt.DeviceId,
+            ParseEventTimeOffset(info.Time),
+            info.Serial,
+            info.Minor?.ToString(CultureInfo.InvariantCulture),
+            info.EmployeeNo,
+            evt.Payload);
+
+        var saved = await TryDownloadPictureFileAsync(evt.DeviceId, info.PictureUrl, fileName, ct).ConfigureAwait(false);
         if (saved.FileName is not { } pictureFile)
         {
             return null;
@@ -569,7 +599,9 @@ public sealed class AcsAlarmForwardService
             CardNo: ReadString(container, "cardNo"),
             EmployeeNo: ReadString(container, "employeeNoString"),
             // 海康 Digest 直连返回的事件里带抓拍图 URL（人脸事件才有）
-            PictureUrl: ReadString(container, "pictureURL") ?? ReadString(container, "pictureUrl"));
+            PictureUrl: ReadString(container, "pictureURL") ?? ReadString(container, "pictureUrl"),
+            // 事件序号：抓拍图文件名与入库链路（对账 / 消费者补图）共用同一 token，才能复用已落盘的图
+            Serial: ReadString(container, "serialNo") ?? ReadString(container, "eventSerialNo"));
 
         return true;
     }
@@ -597,9 +629,16 @@ public sealed class AcsAlarmForwardService
     }
 
     private static DateTime ParseEventTime(string? raw)
+        => ParseEventTimeOffset(raw)?.DateTime ?? DateTime.Now;
+
+    /// <summary>
+    /// 事件时间（保留报文里的时区偏移）；解析失败返回 null。
+    /// 抓拍图文件名用它做时间 token，必须与入库链路（<see cref="AcsEventPictureEnricher.BuildPictureFileName"/>）一致。
+    /// </summary>
+    private static DateTimeOffset? ParseEventTimeOffset(string? raw)
         => DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)
-            ? parsed.DateTime
-            : DateTime.Now;
+            ? parsed
+            : null;
 
     private static int? ReadInt(JsonElement element, string name)
     {
@@ -676,12 +715,16 @@ public sealed class AcsAlarmForwardService
     }
 
     /// <summary>ISAPI JSON 事件报文里转发需要的字段（Digest 直连的报文可能带 <c>pictureURL</c>）。</summary>
+    /// <remarks>
+    /// <c>Serial</c> = <c>serialNo</c> / <c>eventSerialNo</c>：抓拍图文件名与入库链路共用同一 token。
+    /// </remarks>
     private sealed record IsapiEventInfo(
         int? Minor,
         string? Time,
         string? CardNo,
         string? EmployeeNo,
-        string? PictureUrl);
+        string? PictureUrl,
+        string? Serial);
 }
 
 /// <summary>转发判定结果。</summary>

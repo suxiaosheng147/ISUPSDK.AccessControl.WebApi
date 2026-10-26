@@ -20,6 +20,7 @@
     <PackageReference Include="Experimental.System.Messaging" Version="1.1.0" />
     <PackageReference Include="NCrontab.Signed" Version="3.3.3" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="NLog.Web.AspNetCore" Version="6.2.2" />
     <PackageReference Include="SkiaSharp" Version="3.116.1" />
     <!-- Web API / Swagger -->
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
@@ -40,6 +41,10 @@
     </None>
     <!-- 服务参数（报警/图片/NTP/DAS 地址等）由 ISUPDemo.xml 提供，必须随生成复制到输出目录。 -->
     <None Update="ISUPDemo.xml">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <!-- 全项目唯一的日志配置（NLog）。缺失时程序会退回代码内置的等价默认配置，但仍建议始终随发布带上。 -->
+    <None Update="nlog.config">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>

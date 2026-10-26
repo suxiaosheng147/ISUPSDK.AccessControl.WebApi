@@ -1,68 +1,48 @@
-﻿using System.Globalization;
-using System.Text;
+﻿using System.Collections.Concurrent;
+using System.Globalization;
 
 namespace ISUPSDK.AccessControl.WebApi.Services.Logging;
 
 /// <summary>
 /// 业务日志门面：把原控制台项目里"写文件"的日志（<c>Common.WriteFile</c> / <c>WriteFileHours</c>）
-/// 与散落的 <c>Console.WriteLine</c> 统一到 <see cref="ILogger"/>。
+/// 与散落的 <c>Console.WriteLine</c> 统一到 <see cref="ILogger"/>（其唯一 provider 是 NLog）。
 /// <para>
 /// 之所以用静态门面：原控制台的业务代码大量位于<b>静态方法</b>与 <b>SDK 回调</b>中
 /// （同步逻辑、报警回调、透传封装），逐一注入 <c>ILogger</c> 会大幅改动既有逻辑。
 /// 这里由宿主在启动时 <see cref="Attach"/> 一次，之后所有调用点无需改动即可进入统一日志管道。
 /// </para>
 /// <para>
-/// <c>ISUP:Logging:FileFallback=true</c>（默认）时仍按原习惯落盘到
-/// <c>&lt;LogRootDirectory&gt;/log/log_yyyyMMdd/</c>，便于现场排查；设为 false 则只走 ILogger。
+/// 落盘不再由本类完成（改造前会自己追加写 <c>&lt;LogDirectory&gt;/log/log_yyyyMMdd/</c>），
+/// 而是交给 <c>nlog.config</c> 的 <c>bizFile</c> 目标，目录布局为
+/// <c>&lt;LogDirectory&gt;/log/&lt;类名&gt;/&lt;yyyy-MM-dd&gt;/&lt;HH&gt;.log</c>：
+/// <c>Common.WriteFile("ScheduleTimer.txt", …)</c> → <c>logs/log/ScheduleTimer/2026-05-06/14.log</c>；
+/// 未指定文件名的（<c>IsupLog.Info(…)</c>）→ <c>logs/log/IsupLog/&lt;yyyy-MM-dd&gt;/&lt;HH&gt;.log</c>。
 /// </para>
 /// </summary>
 public static class IsupLog
 {
-    /// <summary>ILogger 的分类名。</summary>
+    /// <summary>NLog 里业务日志的 logger 名前缀（nlog.config 用 <c>IsupLog*</c> 规则命中）。</summary>
+    private const string LoggerPrefix = "IsupLog";
+
+    /// <summary>未指定文件名时使用的分类名。</summary>
     private const string DefaultCategory = "Isup";
 
-    private static readonly object Sync = new();
+    /// <summary>按分类缓存的 logger，避免每条日志都走工厂的锁。</summary>
+    private static readonly ConcurrentDictionary<string, ILogger> Loggers = new(StringComparer.Ordinal);
 
-    private static ILogger? _logger;
-    private static bool _fileFallback = true;
+    private static ILoggerFactory? _factory;
 
-    /// <summary>日志根目录（仅文件回退使用），默认程序目录。</summary>
-    public static string LogRootDirectory { get; set; } = AppDomain.CurrentDomain.BaseDirectory;
+    /// <summary>是否已接入日志管道。</summary>
+    public static bool IsAttached => Volatile.Read(ref _factory) is not null;
 
-    /// <summary>是否已接入 ILogger。</summary>
-    public static bool IsAttached
-    {
-        get
-        {
-            lock (Sync)
-            {
-                return _logger is not null;
-            }
-        }
-    }
-
-    /// <summary>是否保留文件落盘。</summary>
-    public static bool FileFallback
-    {
-        get
-        {
-            lock (Sync)
-            {
-                return _fileFallback;
-            }
-        }
-    }
-
-    /// <summary>由宿主启动时调用一次，接入 ILogger 工厂。</summary>
-    public static void Attach(ILoggerFactory factory, bool fileFallback = true)
+    /// <summary>由宿主启动时调用一次，接入 <see cref="ILoggerFactory"/>（其 provider 只有 NLog）。</summary>
+    public static void Attach(ILoggerFactory factory)
     {
         ArgumentNullException.ThrowIfNull(factory);
 
-        lock (Sync)
-        {
-            _logger = factory.CreateLogger(DefaultCategory);
-            _fileFallback = fileFallback;
-        }
+        // 先清缓存再换工厂：重复 Attach（如测试宿主）不会留下旧工厂创建的 logger。
+        Loggers.Clear();
+        Volatile.Write(ref _factory, factory);
     }
 
     #region 与 Common 原有签名保持一致（调用点无需改动）
@@ -100,25 +80,26 @@ public static class IsupLog
 
     private static void Emit(LogLevel level, string? fileName, string message, Exception? exception = null)
     {
-        ILogger? logger;
-        bool fileFallback;
-
-        lock (Sync)
-        {
-            logger = _logger;
-            fileFallback = _fileFallback;
-        }
-
         var category = NormalizeCategory(fileName);
+        var factory = Volatile.Read(ref _factory);
 
-        // 未接入时只落盘，保持与原控制台一致的行为。
-        logger?.Log(level, exception, "[{Category}] {Message}", category, message);
-
-        if (fileFallback || logger is null)
+        if (factory is null)
         {
-            AppendToFile(fileName, category, message);
+            // 尚未接入（宿主启动最早期 / 单测直接调用）：退回标准输出，至少不把日志丢掉。
+            var suffix = exception is null ? string.Empty : " " + exception;
+            Console.WriteLine("[" + category + "] " + message + suffix);
+            return;
         }
+
+        var logger = Loggers.GetOrAdd(category, static (key, f) => f.CreateLogger(BuildLoggerName(key)), factory);
+        logger.Log(level, exception, "[{Category}] {Message}", category, message);
     }
+
+    /// <summary>logger 名同时决定 NLog 的文件夹：<c>IsupLog</c> / <c>IsupLog.&lt;分类&gt;</c>（nlog.config 取最后一个点之后作目录名）。</summary>
+    private static string BuildLoggerName(string category)
+        => string.Equals(category, DefaultCategory, StringComparison.OrdinalIgnoreCase)
+            ? LoggerPrefix
+            : LoggerPrefix + "." + category;
 
     /// <summary>与原生 <c>Console.WriteLine(format, args)</c> 语义一致：无参时原样返回。</summary>
     private static string Format(string message, object?[] args)
@@ -139,7 +120,7 @@ public static class IsupLog
         }
     }
 
-    /// <summary>把文件名归一化为日志分类：去目录、去扩展名、去"15时"这类小时前缀。</summary>
+    /// <summary>把文件名归一化为日志分类：去目录、去扩展名、去"15时"这类小时前缀、清掉文件名非法字符。</summary>
     private static string NormalizeCategory(string? fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName))
@@ -156,38 +137,20 @@ public static class IsupLog
             name = name[(index + 1)..];
         }
 
+        // 分类会拼进 NLog 的 logger 名（nlog.config 取最后一个点之后作目录名），这里挡掉非法字符与点。
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            name = name.Replace(invalid, '_');
+        }
+
+        // 点会被 ${logger:shortName=true} 当成分隔符，替换掉才能保证"一个类一个文件夹"。
+        name = name.Replace('.', '_');
+
         return string.IsNullOrWhiteSpace(name) ? DefaultCategory : name;
     }
 
     private static string PrefixHour(string fileName)
         => DateTime.Now.Hour.ToString(CultureInfo.InvariantCulture) + "时" + fileName;
-
-    /// <summary>按原控制台的落盘方式写入（目录 + 时间戳 + 内容）。</summary>
-    private static void AppendToFile(string? fileName, string category, string message)
-    {
-        var name = string.IsNullOrWhiteSpace(fileName) ? category + ".log" : fileName;
-
-        var directory = Path.Combine(LogRootDirectory, "log", "log_" + DateTime.Today.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
-
-        try
-        {
-            if (!Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            var line = DateTime.Now.ToString(CultureInfo.InvariantCulture) + " " + message + Environment.NewLine;
-
-            lock (Sync)
-            {
-                File.AppendAllText(Path.Combine(directory, name), line, Encoding.Default);
-            }
-        }
-        catch (Exception)
-        {
-            // 文件回退失败不应影响业务；日志已进入 ILogger。
-        }
-    }
 
     #endregion
 }

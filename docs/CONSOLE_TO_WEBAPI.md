@@ -53,7 +53,8 @@
 
 ```
 Modules/
-├── IsupSdkModule.cs      # 设备接入模块：ISUP 配置 + IsupSdkRuntime + HostedService + 日志目录
+├── IsupSdkModule.cs      # 设备接入模块：ISUP 配置 + IsupSdkRuntime + HostedService + 日志门面接入
+├── IsupLoggingModule.cs  # 日志模块：整个进程只走 NLog（nlog.config + ClearProviders + UseNLog）
 └── IsupApiModule.cs      # Web 宿主机模块：CORS + MVC/JSON + Swagger + 异常中间件 + 端点映射
 Endpoints/
 └── HealthEndpoints.cs    # /health
@@ -65,9 +66,11 @@ Controllers/
 `Program.cs` 只做编排：
 
 ```csharp
+builder.AddIsupNLog();  // 日志：NLog
 builder.AddIsupSdk();   // 设备接入
 builder.AddIsupApi();   // Web 宿主
 var app = builder.Build();
+app.UseIsupNLog();
 app.UseIsupApi();
 app.MapIsupEndpoints();
 app.Run();
@@ -75,9 +78,10 @@ app.Run();
 
 ## 5. 已知差异与后续待办
 
-- **日志**：✅ 已统一到 `ILogger` —— `Common.WriteFile*` 与 `Console` 输出经静态门面
-  `Services/Logging/IsupLog` 汇入 `ILogger`（分类 `Isup`），调用点未改动；
-  `ISUP:Logging:FileFallback=true`（默认）时仍按原习惯落盘到 `ISUP:LogDirectory` 下的 `log/log_yyyyMMdd/`。
+- **日志**：✅ 整个项目只走 **NLog**（`nlog.config`）—— 内置 Console/Debug provider 已在启动时移除，
+  `Common.WriteFile*` 与 `Console` 输出经静态门面 `Services/Logging/IsupLog` 汇入 `ILogger`（分类 `Isup`），调用点未改动；
+  业务日志按 `<LogDirectory>/log/<类名>/<yyyy-MM-dd>/<HH>.log` 落盘，宿主日志汇总到 `<LogDirectory>/log/<yyyy-MM-dd>/app.log`。
+  ANCM 的 `stdoutLogEnabled` 已关闭，不再生成 `logs\stdout_*.log`。
 - **优雅停止**：`IsupSdkHostedService.StopAsync` 目前为空实现。原控制台程序也没有停止逻辑，
   后续可补 `NET_ECMS_StopListen` / 各组件 `StopListen` 与 `Release`。
 - **业务接口化**：门禁下发（人员/卡片/人脸/计划/开门）目前仍以 `Distribute/` 内部调用为主，

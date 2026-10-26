@@ -3,7 +3,6 @@ using ISUPSDK.AccessControl.WebApi.Hosting;
 using ISUPSDK.AccessControl.WebApi.Options;
 using ISUPSDK.AccessControl.WebApi.Services;
 using ISUPSDK.AccessControl.WebApi.Services.Logging;
-using Microsoft.Extensions.Options;
 
 namespace ISUPSDK.AccessControl.WebApi.Modules;
 
@@ -35,34 +34,15 @@ public static class IsupSdkModule
     }
 
     /// <summary>
-    /// 接入统一日志门面并初始化日志目录。
+    /// 把业务日志门面接到运行期日志管道上。
     /// <para>
-    /// 必须在应用构建之后、任何业务日志产生之前调用：此后
-    /// <c>Common.WriteFile*</c> 与 SDK 回调内的日志都会进入 <see cref="ILogger"/>。
+    /// 必须在任何业务日志产生之前调用：此后 <c>Common.WriteFile*</c> 与 SDK 回调内的日志
+    /// 都会进入 <see cref="ILogger"/>，其唯一 provider 是 NLog（见 <see cref="IsupLoggingModule"/>）。
     /// </para>
     /// </summary>
     public static WebApplication UseIsupSdk(this WebApplication app)
     {
-        var options = app.Services.GetRequiredService<IOptions<IsupSdkOptions>>().Value;
-        var loggingOptions = app.Services.GetRequiredService<IOptions<IsupLoggingOptions>>().Value;
-
-        var logRoot = string.IsNullOrWhiteSpace(options.LogDirectory)
-            ? AppContext.BaseDirectory
-            : Path.GetFullPath(options.LogDirectory, AppContext.BaseDirectory);
-
-        try
-        {
-            Directory.CreateDirectory(logRoot);
-        }
-        catch (Exception ex)
-        {
-            // 门面尚未接入，这里只能用控制台提示。
-            Console.WriteLine($"[LOG] 业务日志目录初始化失败，沿用程序目录：{ex.Message}");
-            logRoot = AppContext.BaseDirectory;
-        }
-
-        IsupLog.LogRootDirectory = logRoot;
-        IsupLog.Attach(app.Services.GetRequiredService<ILoggerFactory>(), loggingOptions.FileFallback);
+        IsupLog.Attach(app.Services.GetRequiredService<ILoggerFactory>());
 
         return app;
     }

@@ -119,7 +119,8 @@ Visual Studio：打开 `ISUPSDK.AccessControl.sln`，把 `ISUPSDK.AccessControl.
   - `NativeDirectory`：ISUP SDK 原生库目录
   - `AutoStartListen`：是否在启动时初始化 SDK 并监听（调试接口时可设 `false`）
   - `SdkLogDirectory`：SDK 各组件日志目录（`SetLogToFile`）
-  - `LogDirectory`：业务日志根目录（`Common.WriteFile*`），默认 `./logs/`
+  - `LogDirectory`：日志根目录（**NLog** 落盘位置，业务日志按类/日期/小时分文件），默认 `./logs/`
+  - `Logging`：NLog 引导配置（`ConfigFile` 默认 `nlog.config`；`Directory` 留空沿用 `LogDirectory`）
   - `Cors`：跨域配置
 - **`Settings`**：业务配置，**与原控制台项目同名节保持一致**（平台地址、密钥、Crontab、休眠参数等）。
 
@@ -225,7 +226,10 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
 
   这类报文带 `pictureURL`（人脸事件抓拍图，需 Digest 认证才能取）。落盘开关与目录由本节点控制：
   `DownloadPictures`（是否下载）与 `PictureDirectory`（目录，留空沿用 `Settings:Photo`）。
-  转发报文里的图片字段用**平台自己的地址**（不用设备地址，下游无需访问设备）：
+  转发报文里的图片字段用**平台自己的地址**（不用设备地址，下游无需访问设备）；
+  图片**优先复用入库时已落盘的文件**（转发与入库共用同一套文件名规则
+  `{设备}_{事件时间}_{序号|人员编号|报文指纹}.jpeg`），平台还没有图时才按 `pictureURL` 现下载一次
+  —— 对账补历史时设备上的图多半已被覆盖，重复下载只会失败并让报文里没有 URL：
   - `ExtEventPictureURL` = `{PictureUrlPrefix}/{文件名}`：前缀**只**取配置
     `ISUP:IsapiDigest:PictureUrlPrefix`（例：`http://10.0.0.5:5190/api/events/pictures`，反代/域名写
     `https://acs.example.com/acs-pictures`，末尾不带 `/`）。不再按 `Settings:ServerAddress` 推导
@@ -424,14 +428,34 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
 
 ## 6. 日志
 
-日志统一走 .NET 的 `ILogger`：
+整个项目只用一个日志框架：**NLog**（[`src/ISUPSDK.AccessControl.WebApi/nlog.config`](src/ISUPSDK.AccessControl.WebApi/nlog.config)）。
 
-- **业务日志**（原控制台项目的 `Common.WriteFile` / `Common.WriteFileHours`，以及散落的 `Console.WriteLine`）
-  经静态门面 [`Services/Logging/IsupLog.cs`](src/ISUPSDK.AccessControl.WebApi/Services/Logging/IsupLog.cs) 汇入 `ILogger`，分类名为 `Isup`。
+- **装配**：`Program.cs` 的 `builder.AddIsupNLog()` 先 `ClearProviders()` 掉内置 Console / Debug / EventSource，
+  再 `UseNLog()`；`app.UseIsupNLog()` 负责正常停机时 flush。此后宿主 `ILogger<T>`、EF Core、Kestrel 与业务日志
+  全部只由 NLog 决定去向。配置文件缺失或写坏时退回代码内置的等价默认配置
+  （[`Modules/IsupLoggingModule.cs`](src/ISUPSDK.AccessControl.WebApi/Modules/IsupLoggingModule.cs)），不会静默丢日志。
+- **业务日志**（原控制台项目的 `Common.WriteFile` / `Common.WriteFileHours` 以及散落的 `Console.WriteLine`）
+  经静态门面 [`Services/Logging/IsupLog.cs`](src/ISUPSDK.AccessControl.WebApi/Services/Logging/IsupLog.cs) 进入 NLog，
+  门面产生的 logger 名以 `IsupLog` 开头，`nlog.config` 用 `IsupLog*` 规则单独落盘、不混进 `app.log`。
   之所以用门面：原控制台大量逻辑位于**静态方法**与 **SDK 回调**中，无法逐处注入 `ILogger`；
-  门面由宿主在启动时接入一次，**所有调用点均未改动**（`Common.WriteFile*` 的 44 处调用、105 处 `Console` 输出）。
-- **宿主日志**（控制器 / HostedService / 中间件）直接用注入的 `ILogger<T>`。
-- 输出目标与级别由标准 `Logging` 节控制（默认 Console）：
+  门面由宿主在启动时接入一次，**所有调用点均未改动**。
+- **落盘布局**（根目录由 `ISUP:LogDirectory` 决定，默认 `.\logs\`）：
+
+  | 日志 | 路径 | 例子 |
+  |---|---|---|
+  | 业务日志 | `<LogDirectory>\log\<类名>\<yyyy-MM-dd>\<HH>.log` | `logs\log\SyncDoorData\2026-05-06\14.log` |
+  | 宿主日志 | `<LogDirectory>\log\<yyyy-MM-dd>\app.log` | `logs\log\2026-05-06\app.log` |
+
+  「类名」= 原来的日志文件名去扩展名：`Common.WriteFile("SyncDoorData.txt", …)` → `logs\log\SyncDoorData\`；
+  `IsupLog.Info(…)` 这类没传文件名的落在 `logs\log\IsupLog\`。宿主日志（控制器 / HostedService / EF Core）
+  不分类，按日期汇总到 `app.log`。
+- **格式**：`yyyy-MM-dd HH:mm:ss.ffff [级别] [类别] 消息`（UTF-8，异常附堆栈），例如：
+
+  ```
+  2026-05-06 14:32:07.4821 [INFO] IsupLog.SyncDoorData: [SyncDoorData] 设备FZ7955795同步数据无效：Status=1
+  2026-05-06 14:32:08.1130 [INFO] ISUPSDK.AccessControl.WebApi.Services.IsupSdkRuntime: 下发任务队列已启动：库=Sqlite
+  ```
+- **级别**：先由标准 `Logging:LogLevel` 过滤，再由 `nlog.config` 的 `<rules>` 决定去向：
 
   ```jsonc
   "Logging": {
@@ -443,31 +467,26 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
   }
   ```
 
-- **文件回退**：`ISUP:Logging:FileFallback=true`（默认）时，业务日志在进入 `ILogger` 的同时，
-  仍按原习惯写入 `<ISUP:LogDirectory>/log/log_yyyyMMdd/`（现场排查习惯）：
-  `Common.WriteFile("ScheduleTimer.txt", …)` → `ScheduleTimer.txt`；仅 `IsupLog.Info(…)` 的 → `Isup.log`。
-  设为 `false` 则只走 `ILogger`，不再产生 `log` 目录。文件写入沿用系统默认编码（与改造前一致）。
+  规则：业务日志 `Trace` 以上进 `bizFile`+控制台并终止匹配；其余 `Info` 以上进 `app.log`+控制台；
+  `Debug` 只进 Visual Studio 输出窗口，不落盘。改 `nlog.config` 后需重启进程（NLog 6 不再内置配置文件监视）。
+- **不在 NLog 管辖内**：SDK 原生库（HCISUPCMS / HCISUPAlarm / HCISUPSS / HCISUPStream）自己写的日志，
+  目录由 `ISUP:SdkLogDirectory`（`SetLogToFile`）决定，默认 `.\logs\isupsdk\`。
+- **IIS 托管**：`web.config` 的 `stdoutLogEnabled` 已改为 `false`，不再生成 `logs\stdout_<UTC时间>_<pid>.log`；
+  排查冷启动/回收直接看 `logs\log\<yyyy-MM-dd>\app.log`。
 
-SDK 初始化输出的实际形态：
+> 需要转发到 ELK / Seq / 数据库时，在 `nlog.config` 里加一个 target 和对应 `<logger>` 规则即可，业务侧无需改动。
 
-```
-info: Isup[0]
-      [Isup] NET_ECMS_StartListen Succ
-info: Isup[0]
-      [Isup] NET_EALARM_SetSDKLocalCfg ACTIVE_ACCESS_SECURITY Success
-```
-
-> 需要接入文件轮转 / ELK / Seq 时，只需注册相应的 `ILoggerProvider`（如 Serilog），
-> 业务侧无需任何改动。
 ## 7. 模块化装配
 
-`Program.cs` 保持极薄，只做三件事：
+`Program.cs` 保持极薄，只做编排：
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
+builder.AddIsupNLog();  // 模块：日志（整个进程只走 NLog）
 builder.AddIsupSdk();   // 模块：ISUP 设备接入（配置 + 运行时 + HostedService）
 builder.AddIsupApi();   // 模块：Web 宿主（CORS + MVC/JSON + Swagger + 异常处理）
 var app = builder.Build();
+app.UseIsupNLog();      // 停机 flush NLog
 app.UseIsupApi();       // 管道
 app.MapIsupEndpoints(); // 控制器 + /health + 根路径跳转
 app.Run();
@@ -479,5 +498,5 @@ app.Run();
 
 ## 8. 后续待办
 
-见 [docs/CONSOLE_TO_WEBAPI.md](docs/CONSOLE_TO_WEBAPI.md) 第 5 节。当前剩余：业务日志统一到
-`ILogger`、补齐优雅停止（`StopListen` / `Release`）、SS 主动上传到云存储、补测试项目。
+见 [docs/CONSOLE_TO_WEBAPI.md](docs/CONSOLE_TO_WEBAPI.md) 第 5 节。当前剩余：补齐优雅停止（`StopListen` / `Release`）、
+SS 主动上传到云存储、补测试项目。

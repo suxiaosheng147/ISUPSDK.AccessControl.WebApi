@@ -319,14 +319,6 @@ namespace ISUPSDK.AccessControl.WebApi
                 "&CompanyID=11&Token=" + token + "&Ip=" + ip + "&Port=" + port + "&Mid=" + Mid + "&HKLoginId=" + HKLoginId + "&HKLoginTime=" + HKLoginTime + "&HKLogoutTime=" + HKLogoutTime + "&action=" + action + "&TempLoginCount=" + TempLoginCount;
             return url;
         }
-        private readonly static object _Sync = new();
-
-        /// <summary>日志根目录，默认程序目录；由宿主按 ISUP:LogDirectory 覆盖。</summary>
-        public static string LogRootDirectory
-        {
-            get => IsupLog.LogRootDirectory;
-            set => IsupLog.LogRootDirectory = value;
-            }
 
         /// 写TXT文件
         public static void WriteFile(string fileName, bool isAppend, string fileContent)

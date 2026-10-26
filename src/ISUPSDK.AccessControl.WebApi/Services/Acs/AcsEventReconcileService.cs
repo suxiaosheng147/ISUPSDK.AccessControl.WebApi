@@ -1050,7 +1050,9 @@ public sealed class AcsEventReconcileService : BackgroundService
             deviceId,
             eventTime,
             ReadString(info, "serialNo") ?? ReadString(info, "eventSerialNo"),
-            minor?.ToString(CultureInfo.InvariantCulture));
+            minor?.ToString(CultureInfo.InvariantCulture),
+            ReadString(info, "employeeNoString"),
+            payload);
 
         var saved = await _forwarder
             .TryDownloadPictureFileAsync(deviceId, pictureUrl, fileName, ct)
