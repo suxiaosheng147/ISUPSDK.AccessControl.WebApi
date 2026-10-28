@@ -108,6 +108,12 @@ public sealed class IsapiOperationResult
     /// <summary>透传耗时（毫秒）。</summary>
     public long ElapsedMs { get; set; }
 
+    /// <summary>
+    /// 复合操作（如 <c>PersonIssue</c>：人员 → 卡 → 人脸）里"哪一步失败"的可读描述，
+    /// 单报文操作恒为 null。失败时优先用它作为任务错误信息。
+    /// </summary>
+    public string? StepError { get; set; }
+
     public static IsapiOperationResult From(IsupDevice device, IsapiRawMessage request, IsapiResult result) => new()
     {
         UserId = device.UserId,

@@ -34,6 +34,7 @@ CREATE TABLE `AcsTasks` (
     `CompletedAt` bigint NULL,
     `NextAttemptAt` bigint NOT NULL,
     `Description` varchar(512) CHARACTER SET utf8mb4 NULL,
+    `Source` varchar(64) CHARACTER SET utf8mb4 NULL,
     CONSTRAINT `PK_AcsTasks` PRIMARY KEY (`Id`)
 ) CHARACTER SET=utf8mb4;
 

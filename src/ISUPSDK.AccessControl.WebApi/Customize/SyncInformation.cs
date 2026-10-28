@@ -1,6 +1,7 @@
 ﻿using ISUPSDK.AccessControl.WebApi.Services.Logging;
 using Experimental.System.Messaging;
 using HKEDUBasicDataSync.Methods;
+using ISUPSDK.AccessControl.WebApi.Data;
 using ISUPSDK.AccessControl.WebApi.Distribute;
 using ISUPSDK.AccessControl.WebApi.Methods;
 using ISUPSDK.AccessControl.WebApi.Model;
@@ -29,6 +30,33 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
         /// <param name="userInfo"></param>
         /// <returns></returns>
         public static async Task<(bool lb, List<returnErrorModel> tempIdList)> AddPerson(im_machine machine, string Prefix, Detail person, UserInfo? userInfo, Settings settings)
+        {
+            // 队列模式：人员新增先写入数据库（isup_person_queue.db），
+            // 再由定时任务（PersonOperationExecutor）通过控制器接口下发设备
+            if (PersonOperationQueue.Enabled)
+            {
+                var enqueueList = new List<returnErrorModel>();
+                if (PersonOperationQueue.TryEnqueueDetail(machine.MachineSN, Prefix, person, PersonOperationType.Add, GetReturnDataType(Prefix), out string enqueueError))
+                {
+                    return (true, enqueueList);
+                }
+
+                enqueueList.Add(new returnErrorModel { DataId = person.dataId, Err = enqueueError, ErrCode = 0 });
+                return (false, enqueueList);
+            }
+
+            return await ExecuteAddPersonAsync(machine, Prefix, person, userInfo, settings);
+        }
+
+        /// <summary>
+        /// 立即下发新增用户（队列关闭时使用）
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="Prefix"></param>
+        /// <param name="person"></param>
+        /// <param name="userInfo"></param>
+        /// <returns></returns>
+        internal static async Task<(bool lb, List<returnErrorModel> tempIdList)> ExecuteAddPersonAsync(im_machine machine, string Prefix, Detail person, UserInfo? userInfo, Settings settings)
         {
             var tempIdList = new List<returnErrorModel>();
             bool lb = false;
@@ -116,9 +144,39 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
         /// <param name="machine"></param>
         /// <param name="Prefix"></param>
         /// <param name="person"></param>
+        /// <param name="userInfo"></param>
+        /// <param name="settings"></param>
         /// <param name="tempIdList"></param>
         /// <returns></returns>
         public static bool UpdatePerson(im_machine machine, string Prefix, Detail person, UserInfo? userInfo, Settings settings, ref List<returnErrorModel> tempIdList)
+        {
+            // 队列模式：人员修改先写入数据库（isup_person_queue.db），
+            // 再由定时任务（PersonOperationExecutor）通过控制器接口下发设备
+            if (PersonOperationQueue.Enabled)
+            {
+                if (PersonOperationQueue.TryEnqueueDetail(machine.MachineSN, Prefix, person, PersonOperationType.Update, GetReturnDataType(Prefix), out string enqueueError))
+                {
+                    return true;
+                }
+
+                tempIdList.Add(new returnErrorModel { DataId = person.dataId, Err = enqueueError, ErrCode = 0 });
+                return false;
+            }
+
+            return ExecuteUpdatePerson(machine, Prefix, person, userInfo, settings, ref tempIdList);
+        }
+
+        /// <summary>
+        /// 立即下发修改用户（队列关闭时使用）
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="Prefix"></param>
+        /// <param name="person"></param>
+        /// <param name="userInfo"></param>
+        /// <param name="settings"></param>
+        /// <param name="tempIdList"></param>
+        /// <returns></returns>
+        internal static bool ExecuteUpdatePerson(im_machine machine, string Prefix, Detail person, UserInfo? userInfo, Settings settings, ref List<returnErrorModel> tempIdList)
         {
 
             try
@@ -226,6 +284,32 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
         /// <returns></returns>
         public static bool DeletePerson(im_machine machine, string Prefix, Detail person, ref List<returnErrorModel> tempIdList)
         {
+            // 队列模式：人员删除先写入数据库（isup_person_queue.db），
+            // 再由定时任务（PersonOperationExecutor）通过控制器接口下发设备
+            if (PersonOperationQueue.Enabled)
+            {
+                if (PersonOperationQueue.TryEnqueueDetail(machine.MachineSN, Prefix, person, PersonOperationType.Delete, GetReturnDataType(Prefix), out string enqueueError))
+                {
+                    return true;
+                }
+
+                tempIdList.Add(new returnErrorModel { DataId = person.dataId, Err = enqueueError, ErrCode = 0 });
+                return false;
+            }
+
+            return ExecuteDeletePerson(machine, Prefix, person, ref tempIdList);
+        }
+
+        /// <summary>
+        /// 立即下发删除用户（队列关闭时使用）
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="Prefix"></param>
+        /// <param name="person"></param>
+        /// <param name="tempIdList"></param>
+        /// <returns></returns>
+        internal static bool ExecuteDeletePerson(im_machine machine, string Prefix, Detail person, ref List<returnErrorModel> tempIdList)
+        {
             try
             {
                 //var ret = ISUPPostPerson.Del1(machine, person, Prefix, ref tempIdList);
@@ -241,6 +325,22 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
 
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 根据人员编号前缀获取回传数据类型（01=幼儿3，02=家长4，03=职工8）
+        /// </summary>
+        /// <param name="Prefix"></param>
+        /// <returns></returns>
+        private static int GetReturnDataType(string Prefix)
+        {
+            return Prefix switch
+            {
+                "01" => 3,
+                "02" => 4,
+                "03" => 8,
+                _ => 3
+            };
         }
 
         /// <summary>
@@ -410,6 +510,7 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
         /// <returns></returns>
         private static async Task SortOperationAsync(string Prefix, string Url, int ReturnDataType, im_machine machine, Settings settings)
         {
+            var queueMode = PersonOperationQueue.Enabled;//队列模式：入队成功由后台任务下发后再回传，这里不立即回传成功
             var successIdList = new List<string>();//成功ID列表
             var failIdList = new List<returnErrorModel>();//失败ID列表
             var tempIdList = new List<returnErrorModel>();//临时ID列表，当有成功的更新才进行结算
@@ -445,7 +546,9 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
 
                         if (delRet)
                         {
-                            successIdList.Add(item.dataId.ToString());
+                            // 队列模式：入队成功由后台任务下发后再回传，这里不立即回传成功
+                            if (!queueMode)
+                                successIdList.Add(item.dataId.ToString());
                         }
                         else
                         {
@@ -468,7 +571,9 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
                         tempIdList = s.tempIdList;
                         if (addRet)
                         {
-                            successIdList.Add(item.dataId.ToString());
+                            // 队列模式：入队成功由后台任务下发后再回传，这里不立即回传成功
+                            if (!queueMode)
+                                successIdList.Add(item.dataId.ToString());
                         }
                         else
                         {
@@ -489,7 +594,9 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
 
                         if (putRet)
                         {
-                            successIdList.Add(item.dataId.ToString());
+                            // 队列模式：入队成功由后台任务下发后再回传，这里不立即回传成功
+                            if (!queueMode)
+                                successIdList.Add(item.dataId.ToString());
                         }
                         else
                         {

@@ -74,7 +74,7 @@ public sealed class AcsTaskExecutor
                 ? new AcsTaskExecutionResult(AcsTaskExecutionOutcome.Success, Result: result)
                 : new AcsTaskExecutionResult(
                     AcsTaskExecutionOutcome.DeviceFailed,
-                    result.Status?.SubStatusCode ?? result.SdkErrorText ?? "设备拒绝",
+                    result.StepError ?? result.Status?.SubStatusCode ?? result.SdkErrorText ?? "设备拒绝",
                     result);
         }
         catch (OperationCanceledException)
@@ -179,6 +179,15 @@ public sealed class AcsTaskExecutor
                 return WrapAsync(_accessControl.DeleteFaceLibraryAsync(device, request.FdId, timeout, ct));
             }
 
+            // ------------------------------------------------- 平台人员同步（复合操作）
+            // 设备要求"先有人员，才能下发卡片和人脸"：三步在同一条任务内顺序执行，
+            // 人员那一步失败就直接返回，不会继续下发卡/人脸。
+            case AcsTaskOperation.PersonIssue:
+                return IssuePersonAsync(task, device, ct);
+
+            case AcsTaskOperation.PersonIssueDelete:
+                return DeletePersonAsync(task, device, ct);
+
             default:
                 throw new IsupApiException($"未知的任务操作：{task.Operation}");
         }
@@ -215,6 +224,127 @@ public sealed class AcsTaskExecutor
 
     private static async Task<IsapiOperationResult?> WrapAsync(Task<IsapiOperationResult> operation)
         => await operation.ConfigureAwait(false);
+
+    /// <summary>
+    /// 人员下发（复合操作）：人员 →（删旧卡）→ 卡 → 人脸，<b>严格顺序</b>。
+    /// 任何一步设备没接受就立即返回，后面的步骤一律不下发（设备要求"先有人员，才能下发卡片和人脸"）。
+    /// </summary>
+    private async Task<IsapiOperationResult?> IssuePersonAsync(AcsTask task, IsupDevice device, CancellationToken ct)
+    {
+        var payload = Deserialize<PersonIssuePayload>(task);
+        var timeout = task.TimeoutMs == 0 ? 15000u : task.TimeoutMs;
+
+        if (payload.Person is null)
+        {
+            throw new IsupApiException($"任务 {task.Id}（{task.Operation}）缺少人员信息。");
+        }
+
+        // 第一步：人员。没成功就到此为止。
+        ct.ThrowIfCancellationRequested();
+        var result = await _accessControl
+            .SetUpUserAsync(device, payload.Person, timeout, ct)
+            .ConfigureAwait(false);
+        if (!result.DeviceSuccess)
+        {
+            return WithStep(result, "人员信息");
+        }
+
+        // 第二步：换卡时先把旧卡覆盖掉（CardInfo/SetUp + deleteCard=true，与平台同步下发的报文一致）
+        if (!string.IsNullOrWhiteSpace(payload.OldCardNo))
+        {
+            ct.ThrowIfCancellationRequested();
+            result = await _accessControl
+                .SetUpCardAsync(
+                    device,
+                    new IsapiCardInfo
+                    {
+                        CardNo = payload.OldCardNo!,
+                        EmployeeNo = payload.EmployeeNo,
+                        CardType = "normalCard",
+                        DeleteCard = true,
+                    },
+                    timeout,
+                    ct)
+                .ConfigureAwait(false);
+            if (!result.DeviceSuccess)
+            {
+                return WithStep(result, "删除旧卡");
+            }
+        }
+
+        // 第三步：卡（走 CardInfo/SetUp，报文与平台同步下发一致）
+        if (payload.Card is not null)
+        {
+            ct.ThrowIfCancellationRequested();
+            result = await _accessControl
+                .SetUpCardAsync(device, payload.Card, timeout, ct)
+                .ConfigureAwait(false);
+            if (!result.DeviceSuccess)
+            {
+                return WithStep(result, "卡片");
+            }
+        }
+
+        // 第四步：人脸（有照片就下发；没有照片就把设备上的旧人脸清掉）
+        if (payload.Face is not null)
+        {
+            ct.ThrowIfCancellationRequested();
+            result = await _accessControl
+                .UploadFaceByUrlAsync(device, payload.Face, timeout, ct)
+                .ConfigureAwait(false);
+            if (!result.DeviceSuccess)
+            {
+                return WithStep(result, "人脸");
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(payload.DeleteFaceId))
+        {
+            ct.ThrowIfCancellationRequested();
+            result = await _accessControl
+                .DeleteFaceAsync(device, payload.DeleteFaceId!, "1", "blackFD", timeout, ct)
+                .ConfigureAwait(false);
+            if (!result.DeviceSuccess)
+            {
+                return WithStep(result, "删除旧人脸");
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>人员删除（复合操作）：删人员 → 删人脸。</summary>
+    private async Task<IsapiOperationResult?> DeletePersonAsync(AcsTask task, IsupDevice device, CancellationToken ct)
+    {
+        var payload = Deserialize<PersonIssuePayload>(task);
+        var timeout = task.TimeoutMs == 0 ? 15000u : task.TimeoutMs;
+        var employeeNo = string.IsNullOrWhiteSpace(payload.EmployeeNo) ? task.DeviceId : payload.EmployeeNo;
+        var deleteFaceId = string.IsNullOrWhiteSpace(payload.DeleteFaceId) ? employeeNo : payload.DeleteFaceId!;
+
+        ct.ThrowIfCancellationRequested();
+        var result = await _accessControl
+            .DeleteUsersAsync(device, [employeeNo], timeout, ct)
+            .ConfigureAwait(false);
+        if (!result.DeviceSuccess)
+        {
+            return WithStep(result, "删除人员");
+        }
+
+        ct.ThrowIfCancellationRequested();
+        result = await _accessControl
+            .DeleteFaceAsync(device, deleteFaceId, "1", "blackFD", timeout, ct)
+            .ConfigureAwait(false);
+        return result.DeviceSuccess ? result : WithStep(result, "删除人脸");
+    }
+
+    /// <summary>给失败结果打上"哪一步失败了"，供任务错误信息展示。</summary>
+    private static IsapiOperationResult WithStep(IsapiOperationResult result, string step)
+    {
+        var subStatus = result.Status?.SubStatusCode;
+        result.StepError = string.IsNullOrWhiteSpace(subStatus)
+            ? $"{step}下发失败"
+            : $"{step}下发失败（subStatusCode={subStatus}）";
+        return result;
+    }
 
     private static T Deserialize<T>(AcsTask task)
     {

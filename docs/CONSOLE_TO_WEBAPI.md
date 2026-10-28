@@ -108,11 +108,23 @@ app.Run();
 ### 与原控制台 `Distribute/` 的关系
 
 `Distribute/` 里的方法是**面向平台同步场景**的高层封装（入参是平台 DTO，如 `SyncPersonDataPage`），
-仍然保留并被 `Customize/SyncInformation`、`SyncAuthRuleInformation` 使用（设备上线后的自动权限同步）。
-新增的控制器走的是**通用 ISAPI 通道**路径（入参是 ISAPI 风格 JSON），两者并存：
+仍然保留（队列模式关闭时作为回退路径），但**人员的增/改/删不再实时调用它**：
 
-- 平台对接（请假同步、认证规则、按学校/人员批量下发）→ 继续走 `Customize/` + `Distribute/`；
-- 平台/前端直接对设备做门禁操作 → 走本项目的 REST 控制器。
+- 平台对接（`Customize/SyncInformation`、`SyncAuthRuleInformation`）只负责把人员数据写入
+  人员下发队列 `isup_person_queue.db`（`Data/PersonOperationQueue`）；
+- 定时任务 `Customize/PersonOperationCronJob`（入队）在**进程内**把一条队列记录入队为一条 `AcsTask`
+  （`PersonIssue` = 人员 →（删旧卡）→ 卡 → 人脸，`PersonIssueDelete` = 删除），不经控制器/HTTP，
+  任务 ID 记回队列表的 `TaskIds` 字段，随时可用 `/api/tasks`（TasksController）查询下发情况；
+- `AcsTaskExecutor` 负责顺序：**人员那一步没成功就不会下发卡和人脸**（设备要求"先有人员"），
+  任一步失败立即停止，并把"哪一步失败"写进任务错误信息；
+  四步报文都是 SetUp 覆盖语义（人员 `UserInfo/SetUp`、旧卡/新卡 `CardInfo/SetUp`（换卡用 `deleteCard=true`）、
+  人脸 `FDLib/FDSetUp`），不要用 `POST CardInfo/Record`（部分固件返回 `MessageParametersLack`）；
+- 定时任务 `Customize/PersonOperationResultCronJob`（收结果）**独立运行**，直接读任务库拿最终状态，
+  结束后回传平台（`ReturnDataUrl` / `ReturnErrorUrl` / `SyncPersonData`）；
+  **任一步失败即整条人员记录判失败**（与原来的同步下发口径一致）；
+
+所以现在的分工是：平台对接 → `Customize/` → 人员下发队列 → **REST 控制器 → AcsTask → ISAPI 下发**。
+`Settings:PersonOperationQueue:Enabled=false` 可退回原来的实时下发（直接调用 `Distribute/` 的 SDK 方法）。
 
 ### 查询接口的分页约定（统一）
 

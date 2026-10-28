@@ -286,6 +286,13 @@ public sealed class IsapiCardInfo
     [JsonPropertyName("doorNo")]
     public int? DoorNo { get; set; }
 
+    /// <summary>
+    /// 删除标记：仅 <c>CardInfo/SetUp</c> 使用（<c>true</c> = 删除该卡）。
+    /// 平台同步下发（Customize）沿用该语义，其它场景不赋值（不会出现在报文里）。
+    /// </summary>
+    [JsonPropertyName("deleteCard")]
+    public bool? DeleteCard { get; set; }
+
     /// <summary>有效期限。</summary>
     [JsonPropertyName("Valid")]
     public IsapiValidPeriod? Valid { get; set; }

@@ -301,6 +301,12 @@ namespace ISUPSDK.AccessControl.WebApi
         /// </summary>
         public Guid Id { get; set; }
 
+        /// <summary>
+        /// 添加时间
+        /// </summary>
+        [DisplayName("添加时间")]
+        public DateTime AddTime { get; set; }
+
     }
 
 
@@ -310,6 +316,12 @@ namespace ISUPSDK.AccessControl.WebApi
         public int DataId { get; set; }
         public string Err { get; set; }
         public int ErrCode { get; set; }
+
+        /// <summary>
+        /// 添加时间（平台下发的时间，回传时原样带回）
+        /// </summary>
+        [DisplayName("添加时间")]
+        public DateTime? AddTime { get; set; }
     }
 
     [XmlRoot(ElementName = "Params")]
@@ -1054,6 +1066,12 @@ namespace ISUPSDK.AccessControl.WebApi
         /// </summary>
         public string SourceId_List1 { get; set; }   // 存 list1 的 Id
 
+        /// <summary>
+        /// 添加时间
+        /// </summary>
+        [DisplayName("添加时间")]
+        public DateTime AddTime { get; set; }
+
     }
 
     /// <summary>
@@ -1117,6 +1135,12 @@ namespace ISUPSDK.AccessControl.WebApi
         /// 源Id1
         /// </summary>
         public string SourceId_List1 { get; set; }   // 存 list1 的 Id
+
+        /// <summary>
+        /// 添加时间（平台下发的时间，回传时原样带回）
+        /// </summary>
+        [DisplayName("添加时间")]
+        public DateTime? AddTime { get; set; }
     }
 
 

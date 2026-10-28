@@ -32,7 +32,8 @@ CREATE TABLE "AcsTasks" (
     "StartedAt" INTEGER NULL,
     "CompletedAt" INTEGER NULL,
     "NextAttemptAt" INTEGER NOT NULL,
-    "Description" TEXT NULL
+    "Description" TEXT NULL,
+    "Source" TEXT NULL
 );
 
 

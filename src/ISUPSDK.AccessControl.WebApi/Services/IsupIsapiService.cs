@@ -202,12 +202,32 @@ public sealed class IsupIsapiService
     // ==========================================================================================
 
     /// <summary>新增卡片（POST /ISAPI/AccessControl/CardInfo/Record?format=json）。</summary>
+    /// <remarks>
+    /// 部分门禁固件不认 <c>CardInfo/Record</c>（返回 <c>subStatusCode=MessageParametersLack</c>）；
+    /// 平台人员同步（Customize）场景请用 <see cref="SetUpCardAsync"/>（<c>CardInfo/SetUp</c>）。
+    /// </remarks>
     public Task<IsapiOperationResult> AddCardAsync(IsupDevice device, IsapiCardInfo card, uint timeoutMs = 15000, CancellationToken ct = default)
         => SendJsonAsync(device, IsapiEndpoints.CardInfoRecord, JsonQuery, card, timeoutMs, ct);
 
     /// <summary>修改卡片（PUT /ISAPI/AccessControl/CardInfo/Modify?format=json）。</summary>
     public Task<IsapiOperationResult> UpdateCardAsync(IsupDevice device, IsapiCardInfo card, uint timeoutMs = 15000, CancellationToken ct = default)
         => SendJsonAsync(device, IsapiEndpoints.CardInfoModify, JsonQuery, card, timeoutMs, ct, IsapiHttpMethod.Put);
+
+    /// <summary>
+    /// 卡片整体覆盖（PUT /ISAPI/AccessControl/CardInfo/SetUp?format=json）。
+    /// <para>
+    /// 与平台同步下发（原 <c>Distribute/ISUPPostCard</c>）的报文一致：
+    /// <c>{"CardInfo":{"cardNo":"…","employeeNo":"…","cardType":"normalCard","deleteCard":false}}</c>。
+    /// 部分门禁固件不认 <c>CardInfo/Record</c>（Post 新增卡）会返回
+    /// <c>subStatusCode=MessageParametersLack</c>，平台同步场景一律走这里。
+    /// </para>
+    /// </summary>
+    /// <param name="device">目标设备。</param>
+    /// <param name="card">卡片信息（<c>deleteCard=true</c> 表示删除该卡）。</param>
+    /// <param name="timeoutMs">透传超时（毫秒）。</param>
+    /// <param name="ct">取消令牌。</param>
+    public Task<IsapiOperationResult> SetUpCardAsync(IsupDevice device, IsapiCardInfo card, uint timeoutMs = 15000, CancellationToken ct = default)
+        => SendJsonAsync(device, IsapiEndpoints.CardInfoSetUp, JsonQuery, card, timeoutMs, ct, IsapiHttpMethod.Put);
 
     /// <summary>按卡号删除卡片（PUT /ISAPI/AccessControl/CardInfo/Delete?format=json）。</summary>
     public Task<IsapiOperationResult> DeleteCardsAsync(IsupDevice device, IEnumerable<string> cardNos, uint timeoutMs = 15000, CancellationToken ct = default)

@@ -33,6 +33,9 @@ app.UseIsupSdk();
 // 任务库 / 事件库建表（轻量场景直接用 EnsureCreated）。
 await app.EnsureIsupAccessControlStorageAsync();
 
+// 宿主启动完成后初始化人员下发队列（isup_person_queue.db）：之后 Customize 的人员同步走"入库 → 控制器入队"。
+app.InitPersonOperationQueue();
+
 app.UseIsupApi();
 app.MapIsupEndpoints();
 

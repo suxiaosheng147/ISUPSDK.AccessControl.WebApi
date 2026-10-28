@@ -148,7 +148,7 @@ ISAPI 透传失败 `502`（`code` 为 SDK 错误码）；事件库未就绪 `503
 | `AlarmsController` | `/api/alarms` | 报警监听状态与启停、门禁事件查询（内存缓冲）、设备侧 HTTP 上报下发 |
 | `StorageController` | `/api/storage` | SS 存储状态、已接收图片列表 / 下载 / 删除 |
 | `EventsController` | `/api/events` | 事件库状态、已入库事件查询 / 详情 / 多维统计、手工补录、从设备补漏 |
-| `TasksController` | `/api/tasks` | 异步下发任务查询 / 重试 / 取消 |
+| `TasksController` | `/api/tasks` | 异步下发任务查询（列表 / 分页 `/api/tasks/page`）/ 重试 / 取消 |
 | `SystemController` | `/api/system/sdk` | ISUP SDK 运行状态（初始化、监听句柄、在线设备、报警计数） |
 
 另有：`/health`（健康检查）、`/swagger`（接口文档）、`/`（跳转 Swagger）、
@@ -348,6 +348,10 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
 由 `AcsTaskWorker` 定时取出执行，调用方凭 `GET /api/tasks/{id}` 查询结果。
 任务库的配置节是 `ISUP:TaskQueue`，与事件库完全独立：
 
+> 翻页用 `GET /api/tasks/page?pageIndex=1&pageSize=20`（可选过滤：`deviceId` / `entity` / `status` /
+> `source` / `createdFrom` / `createdTo`），返回 `total` / `pageIndex` / `pageSize` / `totalPages` / `tasks`，
+> 按创建时间倒序；`source=person-operation` 只看人员下发队列创建的任务，`source=direct` 只看来源为空的任务。
+
 | Provider | 配置 | 说明 |
 |---|---|---|
 | `Sqlite`（默认） | `DatabasePath: "./storage/acs-tasks.db"` | 零外部依赖，单文件；路径按程序目录（`AppContext.BaseDirectory`）解析 |
@@ -394,6 +398,74 @@ SDK 报警回调 ──► IsupAmsService（内存缓冲；只广播原始报文
 > 1. 执行中实例崩溃时任务会停在 `Running`，需要人工 `POST /api/tasks/{id}/retry`；
 > 2. `TaskQueue:BinaryDirectory`（人脸图片等附件）仍是本地磁盘，多实例需改用共享目录。
 > SQLite 单文件在多实例下还有写锁竞争，多实例建议用 MySQL / SQL Server。
+
+#### 人员下发队列（平台同步 → 进程内入队 → 顺序下发）
+
+平台（`Customize/SyncInformation`、`SyncAuthRuleInformation`）下发的人员增/改/删**不再实时调用**
+`Distribute/` 的 SDK 方法，而是先写入独立的队列库 `isup_person_queue.db`，再由**两个相互独立的定时任务**
+入队到 `AcsTasks` 并回传结果：
+
+```
+平台 → Customize（入队）→ isup_person_queue.db
+        ┌────────────────────────────────────────────────────────────────┐
+        │ ① 入队  Crontab:PersonOperationQueue（默认每分钟）              │
+        │   PersonOperationExecutor.PublishAsync：进程内直接调           │
+        │   AcsTaskService（不经控制器/HTTP），一条人员操作 = 一条任务： │
+        │   Operation=PersonIssue / PersonIssueDelete                    │
+        │   → AcsTasks（任务 ID 记回队列表 TaskIds）→ AcsTaskWorker      │
+        ├────────────────────────────────────────────────────────────────┤
+        │ ② 收结果  Crontab:PersonOperationResult（默认每分钟）          │
+        │   PersonOperationExecutor.CollectAsync：直接读任务库           │
+        │   完成后回传平台（ReturnDataUrl / ReturnErrorUrl /             │
+        │   SyncPersonData），并清理过期任务                             │
+        └────────────────────────────────────────────────────────────────┘
+```
+
+**下发顺序**（设备要求"先有人员，才能下发卡片和人脸"）在 `AcsTaskExecutor` 内保证：
+`PersonIssue` 按 **人员 →（删旧卡）→ 卡 → 人脸** 依次执行，任何一步设备没接受**立刻停止**，
+后面的卡/人脸绝不下发；`PersonIssueDelete` 是 **删人员 → 删人脸**。
+因为三步在同一条任务内顺序执行，所以**不能**把一条人员操作拆成多条任务（拆开后各自被
+`AcsTaskWorker` 取走，顺序不可控）。
+
+报文口径与原来的 `Distribute/` 一致，**四步全部是"SetUp 覆盖"语义**（新增和修改用同一套报文，设备上已有就覆盖）：
+
+| 步骤 | 请求 | 报文 |
+|---|---|---|
+| 人员 | `PUT /ISAPI/AccessControl/UserInfo/SetUp?format=json` | `{"UserInfo":{"employeeNo","name","userType":"normal","Valid":{…},"doorRight":"1","RightPlan":[…]}}` |
+| 旧卡（换卡时） | `PUT /ISAPI/AccessControl/CardInfo/SetUp?format=json` | `{"CardInfo":{"cardNo","employeeNo","cardType":"normalCard","deleteCard":true}}` |
+| 卡 | `PUT /ISAPI/AccessControl/CardInfo/SetUp?format=json` | `{"CardInfo":{"cardNo","employeeNo","cardType":"normalCard","deleteCard":false}}` |
+| 人脸 | `PUT /ISAPI/Intelligent/FDLib/FDSetUp?format=json` | `{"faceLibType":"blackFD","FDID":"1","FPID","name","faceURL"}`（裸报文，不包根节点） |
+
+> 不要用 `POST CardInfo/Record`（部分固件返回 `subStatusCode=MessageParametersLack`）；
+> 删除人员 / 没有照片时清旧人脸仍走 Delete 接口（删除没有覆盖语义）。
+
+两个定时任务**不共用一把锁、也不在同一轮里顺序执行**：任务要等 `AcsTaskWorker` 真正下发到设备
+（设备离线时可能等上几分钟甚至几十分钟），如果和入队挤在同一轮，会把新的人员数据一起堵住。
+
+- 配置节：`Settings:Database`（队列库，默认 SQLite `isup_person_queue.db`）、
+  `Settings:PersonOperationQueue`（批量、间隔、回传开关、任务等待超时、删除兜底）。
+- 定时任务（`Crontab` 节，任一留空即不启动）：`PersonOperationQueue`（入队）、
+  `PersonOperationResult`（收结果）、`PersonDeleteVerify`（删除兜底）。
+- 队列表 `PersonOperationTask` 的 `TaskIds` 列保存对应的 `AcsTask.Id`（JSON 数组，
+  一条人员操作只有一个元素），可用 `/api/tasks?deviceId=…`、`/api/tasks/page` 或 `GET /api/tasks/{id}` 查。
+- 入队去重：同一设备 + 人员 + 流程 + 操作，只要已有**在途**记录
+  （`Pending` / `Running` / `Issuing`）就直接跳过 —— 既不新增也不覆盖那条记录的载荷
+  （在途记录可能已被执行器取走，改载荷会前后不一致）；等它走完，平台下次下发的变更会重新入队。
+  终态（`Succeeded` / `Failed`）不影响新入队。
+- 区分来源：入队时显式把 `AcsTask.Source` 设为 `person-operation`（`/api/tasks` 的 `source` 字段）；
+  调用方直接调控制器创建的任务该字段为空。收结果阶段会校验来源，
+  遇到"不是本队列创建"的任务按失败处理并记日志，避免把别人的任务当成人员下发结果。
+- 状态流转：`Pending`（待下发）→ `Running`（正在入队）→ `Issuing`（已入队，等设备执行）
+  → `Succeeded` / `Failed`。`Issuing` 超过 `TaskTimeoutMinutes`（默认 60）仍未结束按失败回传，
+  避免设备长期离线导致平台永远收不到结果。
+- 收结果口径：**只有 `AcsTask` 的 `Succeeded` / `Failed` 两个终态才回传平台**；
+  `Pending` / `Running`（设备还没执行完）和 `Canceled`（任务被人为取消、不会再有结果）都不回传，
+  继续留在 `Issuing` 等下一轮，直到超过 `TaskTimeoutMinutes` 才按失败回传。
+- 结果口径：人员 → 卡 → 人脸**任一步失败即整条人员记录判失败**（后续步骤不再下发，
+  失败原因会写明是哪一步，例如"卡片下发失败（subStatusCode=…）"）；
+  认证规则流程入队时会先回传 `State=4（下发中）`，最终结果再由定时任务回传 `3/2`。
+- `Settings:PersonOperationQueue:Enabled=false` 可退回原来的实时下发（直接调用 `Distribute/`）。
+- 队列库的建表与补列（`TaskIds`）在宿主启动后自动完成，老库无需手工迁移。
 
 ### 5.1 ISAPI 透传底座
 

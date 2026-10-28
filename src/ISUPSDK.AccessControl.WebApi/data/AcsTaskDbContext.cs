@@ -51,6 +51,7 @@ public sealed class AcsTaskDbContext : DbContext
         task.Property(t => t.Status).HasConversion<int>();
         task.Property(t => t.SubStatusCode).HasMaxLength(128);
         task.Property(t => t.PayloadFormat).HasMaxLength(16);
+        task.Property(t => t.Source).HasMaxLength(64);
         task.Property(t => t.Error).HasMaxLength(2048);
         task.Property(t => t.Description).HasMaxLength(512);
 

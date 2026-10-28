@@ -39,6 +39,16 @@ public enum AcsTaskOperation
     FaceLibraryCreate = 306,
     FaceLibraryUpdate = 307,
     FaceLibraryDelete = 308,
+
+    // ---- 平台人员同步（Customize）：一条人员操作 = 一次顺序下发 ----
+    //
+    // 设备要求"先有人员，才能下发卡片和人脸"，所以这三步必须是**同一条任务内顺序执行**，
+    // 不能拆成多条任务（拆开后各自被 AcsTaskWorker 取走，顺序不可控）。
+    /// <summary>新增/修改人员：人员 →（删旧卡）→ 卡 → 人脸，任一步失败即停止。</summary>
+    PersonIssue = 401,
+
+    /// <summary>删除人员：删人员 → 删人脸。</summary>
+    PersonIssueDelete = 402,
 }
 
 /// <summary>任务状态。</summary>
@@ -125,8 +135,25 @@ public sealed class AcsTask
     /// <summary>下次可执行时间（用于设备离线时的等待退避）。</summary>
     public DateTimeOffset NextAttemptAt { get; set; }
 
+    /// <summary>
+    /// 任务来源标识（<c>X-Task-Source</c> 请求头）；<c>null</c> 表示调用方直接调控制器接口创建的任务。
+    /// 例如人员下发队列创建的任务都是 <see cref="AcsTaskSources.PersonOperation"/>。
+    /// </summary>
+    public string? Source { get; set; }
+
     /// <summary>可读描述（便于列表展示）。</summary>
     public string? Description { get; set; }
+}
+
+
+/// <summary>任务来源标识的取值（与 <c>X-Task-Source</c> 请求头对应）。</summary>
+public static class AcsTaskSources
+{
+    /// <summary>来源标识的请求头名。</summary>
+    public const string HeaderName = "X-Task-Source";
+
+    /// <summary>人员下发队列（Customize：平台人员同步 → 控制器入队）创建的任务。</summary>
+    public const string PersonOperation = "person-operation";
 }
 
 

@@ -279,6 +279,16 @@ namespace ISUPSDK.AccessControl.WebApi.Model
 
         public NightBoostSettings NightBoost { get; set; } = new();
 
+        /// <summary>
+        /// 人员下发队列数据库（默认 SQLite 的 isup_person_queue.db）。
+        /// </summary>
+        public ISUPSDK.AccessControl.WebApi.Data.PersonOperationDatabaseSettings? Database { get; set; }
+
+        /// <summary>
+        /// 人员下发队列（人员增删改先入库，再由定时任务通过控制器接口下发设备）。
+        /// </summary>
+        public ISUPSDK.AccessControl.WebApi.Data.PersonOperationQueueSettings? PersonOperationQueue { get; set; }
+
     }
 
     public class NightBoostSettings

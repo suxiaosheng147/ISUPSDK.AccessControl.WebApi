@@ -1,6 +1,7 @@
 ﻿using ISUPSDK.AccessControl.WebApi.Services.Logging;
 using Experimental.System.Messaging;
 using HKEDUBasicDataSync.Methods;
+using ISUPSDK.AccessControl.WebApi.Data;
 using ISUPSDK.AccessControl.WebApi.Distribute;
 using ISUPSDK.AccessControl.WebApi.Methods;
 using ISUPSDK.AccessControl.WebApi.Model;
@@ -470,6 +471,14 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
                     {
                         if (UpdateData.Data != null && UpdateData.Data.Count > 0)
                         {
+                            // 队列模式：人员增/改/删先入库（isup_person_queue.db），
+                            // 由定时任务（PersonOperationExecutor）通过控制器接口下发设备并回传平台
+                            if (PersonOperationQueue.Enabled)
+                            {
+                                await EnqueuePersonDataAsync(machine, settings, UpdateData.Data);
+                                return;
+                            }
+
                             List<PutSyncPersonData> putSyncPersonDatas = [];
                             List<UserInfo> UserInfo = [];
 
@@ -485,7 +494,7 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
                                         State=operationMachineResult.Success ? 3 : 2;
                                         break;
                                     case 2:
-                                        operationMachineResult = await AddPersonAsync(machine, settings, item);
+                                        operationMachineResult = await AddPersonAsync(machine, settings, item, PersonOperationType.Update);
                                         State = operationMachineResult.Success ? 3 : 2;
                                         break;
                                     case 3:
@@ -507,6 +516,7 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
                                     IssuePersonFaceResult = operationMachineResult.IssuePersonFaceResult,
                                     SourceId_List = item.SourceId_List,
                                     SourceId_List1 = item.SourceId_List1,
+                                    AddTime = PersonOperationQueue.ToCallbackAddTime(item.AddTime),
 
                                 });
                             }
@@ -535,12 +545,86 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
 
 
         /// <summary>
+        /// 队列模式：人员数据入队，入队成功立即回传"下发中"(4)，入队失败回传"下发失败"(2)；
+        /// 设备下发完成后由定时任务（PersonOperationExecutor）再回传成功(3)/失败(2)
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="settings"></param>
+        /// <param name="dataList"></param>
+        /// <returns></returns>
+        private static async Task EnqueuePersonDataAsync(im_machine machine, Settings settings, List<SyncPersonDataPage> dataList)
+        {
+            var putSyncPersonDatas = new List<PutSyncPersonData>();
+            foreach (var item in dataList)
+            {
+                var operationType = item.Method switch
+                {
+                    1 => PersonOperationType.Add,
+                    2 => PersonOperationType.Update,
+                    3 => PersonOperationType.Delete,
+                    _ => (PersonOperationType?)null
+                };
+                if (operationType == null)
+                    continue;
+
+                if (PersonOperationQueue.TryEnqueueSyncPersonData(machine.MachineSN, item, operationType.Value, out string enqueueError))
+                {
+                    // 入队成功：立即回传"下发中"，等定时任务真正下发设备后再回传结果
+                    putSyncPersonDatas.Add(new PutSyncPersonData
+                    {
+                        Id = item.Id,
+                        State = SyncPersonDataState.Issuing,
+                        ErrorMessage = string.Empty,
+                        SourceId_List = item.SourceId_List,
+                        SourceId_List1 = item.SourceId_List1,
+                        AddTime = PersonOperationQueue.ToCallbackAddTime(item.AddTime)
+                    });
+                    continue;
+                }
+
+                putSyncPersonDatas.Add(new PutSyncPersonData
+                {
+                    Id = item.Id,
+                    State = SyncPersonDataState.Failed,
+                    ErrorMessage = enqueueError,
+                    SourceId_List = item.SourceId_List,
+                    SourceId_List1 = item.SourceId_List1,
+                    AddTime = PersonOperationQueue.ToCallbackAddTime(item.AddTime)
+                });
+            }
+
+            if (putSyncPersonDatas.Count == 0)
+                return;
+
+            var authorizationToken = Common.SetToken(settings.WebCheckCode1 ?? string.Empty);
+            await HttpHelper.PutUrlAsync(settings.SyncPersonData, putSyncPersonDatas, authorizationToken);
+        }
+
+        /// <summary>
         /// 删除用户
         /// </summary>
         /// <param name="machine"></param>
         /// <param name="person"></param>
         /// <returns></returns>
         public static (bool,string) DeletePerson(im_machine machine, SyncPersonDataPage person)
+        {
+            // 队列模式：人员删除先写入数据库，再由定时任务（PersonOperationExecutor）下发设备
+            if (PersonOperationQueue.Enabled)
+            {
+                var enqueued = PersonOperationQueue.TryEnqueueSyncPersonData(machine.MachineSN, person, PersonOperationType.Delete, out string enqueueError);
+                return (enqueued, enqueued ? "已加入下发队列" : enqueueError);
+            }
+
+            return ExecuteDeletePerson(machine, person);
+        }
+
+        /// <summary>
+        /// 立即下发删除用户（队列关闭时使用）
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="person"></param>
+        /// <returns></returns>
+        internal static (bool, string) ExecuteDeletePerson(im_machine machine, SyncPersonDataPage person)
         {
             try
             {
@@ -562,6 +646,30 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
         /// <param name="person"></param>
         /// <returns></returns>
         public static  OperationMachineResult DeletePersonInfo(im_machine machine, SyncPersonDataPage person)
+        {
+            // 队列模式：人员删除先写入数据库，再由定时任务（PersonOperationExecutor）下发设备
+            if (PersonOperationQueue.Enabled)
+            {
+                var enqueued = PersonOperationQueue.TryEnqueueSyncPersonData(machine.MachineSN, person, PersonOperationType.Delete, out string enqueueError);
+                return new OperationMachineResult
+                {
+                    Success = enqueued,
+                    IssuePersonInfoResult = enqueued
+                        ? null
+                        : new IssuePersonInfoResult { Success = false, ErrorMessage = enqueueError }
+                };
+            }
+
+            return ExecuteDeletePersonInfo(machine, person);
+        }
+
+        /// <summary>
+        /// 立即下发删除用户（队列关闭时使用）
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="person"></param>
+        /// <returns></returns>
+        internal static OperationMachineResult ExecuteDeletePersonInfo(im_machine machine, SyncPersonDataPage person)
         {
             OperationMachineResult result = new();
             try
@@ -585,9 +693,36 @@ namespace ISUPSDK.AccessControl.WebApi.Customize
         /// 添加用户
         /// </summary>
         /// <param name="machine"></param>
+        /// <param name="settings"></param>
+        /// <param name="person"></param>
+        /// <param name="operationType"></param>
+        /// <returns></returns>
+        public static async Task<OperationMachineResult> AddPersonAsync(im_machine machine, Settings settings, SyncPersonDataPage person, PersonOperationType operationType = PersonOperationType.Add)
+        {
+            // 队列模式：人员新增/修改先写入数据库，再由定时任务（PersonOperationExecutor）下发设备
+            if (PersonOperationQueue.Enabled)
+            {
+                var enqueued = PersonOperationQueue.TryEnqueueSyncPersonData(machine.MachineSN, person, operationType, out string enqueueError);
+                return new OperationMachineResult
+                {
+                    Success = enqueued,
+                    IssuePersonInfoResult = enqueued
+                        ? null
+                        : new IssuePersonInfoResult { Success = false, ErrorMessage = enqueueError }
+                };
+            }
+
+            return await ExecuteAddPersonAsync(machine, settings, person);
+        }
+
+        /// <summary>
+        /// 立即下发新增/修改用户（队列关闭时使用）
+        /// </summary>
+        /// <param name="machine"></param>
+        /// <param name="settings"></param>
         /// <param name="person"></param>
         /// <returns></returns>
-        public static async Task<OperationMachineResult> AddPersonAsync(im_machine machine, Settings settings, SyncPersonDataPage person)
+        internal static async Task<OperationMachineResult> ExecuteAddPersonAsync(im_machine machine, Settings settings, SyncPersonDataPage person)
         {
 
             OperationMachineResult result = new();

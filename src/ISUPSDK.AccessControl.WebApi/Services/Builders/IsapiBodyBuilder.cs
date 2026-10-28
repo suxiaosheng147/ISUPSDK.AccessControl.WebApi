@@ -39,6 +39,7 @@ public static class IsapiBodyBuilder
         // 卡片
         [IsapiEndpoints.CardInfoRecord] = "CardInfo",
         [IsapiEndpoints.CardInfoModify] = "CardInfo",
+        [IsapiEndpoints.CardInfoSetUp] = "CardInfo",
         [IsapiEndpoints.CardInfoDelete] = "CardInfoDelCond",
 
         // 人脸库

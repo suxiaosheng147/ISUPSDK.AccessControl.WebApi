@@ -32,6 +32,7 @@ CREATE TABLE [AcsTasks] (
     [CompletedAt] bigint NULL,
     [NextAttemptAt] bigint NOT NULL,
     [Description] nvarchar(512) NULL,
+    [Source] nvarchar(64) NULL,
     CONSTRAINT [PK_AcsTasks] PRIMARY KEY ([Id])
 );
 GO

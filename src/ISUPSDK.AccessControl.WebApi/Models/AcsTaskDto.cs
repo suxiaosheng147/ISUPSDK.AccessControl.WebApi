@@ -15,6 +15,9 @@ public sealed class AcsTaskDto
 
     public string Status { get; set; } = string.Empty;
 
+    /// <summary>任务来源标识（<c>null</c> = 调用方直接调控制器创建）。</summary>
+    public string? Source { get; set; }
+
     public string? Description { get; set; }
 
     /// <summary>请求体原文格式（json / xml）。</summary>
@@ -48,6 +51,7 @@ public sealed class AcsTaskDto
         Entity = task.Entity.ToString(),
         Operation = task.Operation.ToString(),
         Status = task.Status.ToString(),
+        Source = task.Source,
         Description = task.Description,
         Attempts = task.Attempts,
         DeviceStatusCode = task.DeviceStatusCode,

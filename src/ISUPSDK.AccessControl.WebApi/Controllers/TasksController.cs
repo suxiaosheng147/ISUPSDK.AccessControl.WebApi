@@ -53,33 +53,71 @@ public sealed class TasksController : ControllerBase
         [FromQuery] int limit = 50,
         CancellationToken ct = default)
     {
-        AcsTaskEntityType? entityFilter = null;
-        if (!string.IsNullOrWhiteSpace(entity))
-        {
-            if (!Enum.TryParse<AcsTaskEntityType>(entity, ignoreCase: true, out var parsedEntity))
-            {
-                throw new IsupApiException($"无效的 entity：{entity}（应为 Person / Card / Face / FaceLibrary）。");
-            }
-
-            entityFilter = parsedEntity;
-        }
-
-        AcsTaskStatus? statusFilter = null;
-        if (!string.IsNullOrWhiteSpace(status))
-        {
-            if (!Enum.TryParse<AcsTaskStatus>(status, ignoreCase: true, out var parsedStatus))
-            {
-                throw new IsupApiException($"无效的 status：{status}（应为 Pending / Running / Succeeded / Failed / Canceled）。");
-            }
-
-            statusFilter = parsedStatus;
-        }
+        var entityFilter = ParseEntityFilter(entity);
+        var statusFilter = ParseStatusFilter(status);
 
         var list = await _tasks.ListAsync(deviceId, entityFilter, statusFilter, limit, ct);
         return Ok(ApiResponse<object>.Ok(new
         {
             total = list.Count,
             tasks = list.Select(t => AcsTaskDto.From(t, includeResult: false)).ToList(),
+        }));
+    }
+
+    /// <summary>
+    /// 分页查询任务（按创建时间倒序，最新在前）。
+    /// <para>
+    /// 与 <c>GET /api/tasks</c> 的区别：返回总条数与页码信息，适合在页面上翻页；
+    /// 过滤条件在数据库侧执行，不会把整表读进内存。
+    /// </para>
+    /// </summary>
+    /// <param name="pageIndex">页码（从 1 开始，默认 1）。</param>
+    /// <param name="pageSize">每页条数（1~200，默认 20）。</param>
+    /// <param name="deviceId">按设备过滤（可选）。</param>
+    /// <param name="entity">按对象类型过滤：Person / Card / Face / FaceLibrary（可选）。</param>
+    /// <param name="status">按状态过滤：Pending / Running / Succeeded / Failed / Canceled（可选）。</param>
+    /// <param name="source">按来源过滤，例如 <c>person-operation</c>（人员下发队列创建的任务）；传 <c>direct</c> 表示只看直接调用创建的任务（可选）。</param>
+    /// <param name="createdFrom">创建时间下限（含，可选）。</param>
+    /// <param name="createdTo">创建时间上限（含，可选）。</param>
+    /// <param name="ct">取消令牌。</param>
+    [HttpGet("page")]
+    public async Task<IActionResult> PageAsync(
+        [FromQuery] int pageIndex = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? deviceId = null,
+        [FromQuery] string? entity = null,
+        [FromQuery] string? status = null,
+        [FromQuery] string? source = null,
+        [FromQuery] DateTimeOffset? createdFrom = null,
+        [FromQuery] DateTimeOffset? createdTo = null,
+        CancellationToken ct = default)
+    {
+        var entityFilter = ParseEntityFilter(entity);
+        var statusFilter = ParseStatusFilter(status);
+
+        pageIndex = Math.Max(pageIndex, 1);
+        pageSize = Math.Clamp(pageSize, 1, 200);
+
+        // "direct" 是约定的"来源为空"写法，便于筛选调用方直接调控制器创建的任务
+        var sourceFilter = string.IsNullOrWhiteSpace(source)
+            ? null
+            : string.Equals(source, DirectSourceFilter, StringComparison.OrdinalIgnoreCase) ? string.Empty : source.Trim();
+
+        if (createdFrom is { } from && createdTo is { } to && from > to)
+        {
+            throw new IsupApiException("createdFrom 不能晚于 createdTo。");
+        }
+
+        var (items, total) = await _tasks
+            .ListPagedAsync(pageIndex, pageSize, deviceId, entityFilter, statusFilter, sourceFilter, createdFrom, createdTo, ct);
+
+        return Ok(ApiResponse<object>.Ok(new
+        {
+            total,
+            pageIndex,
+            pageSize,
+            totalPages = (int)Math.Ceiling(total / (double)pageSize),
+            tasks = items.Select(t => AcsTaskDto.From(t, includeResult: false)).ToList(),
         }));
     }
 
@@ -110,5 +148,40 @@ public sealed class TasksController : ControllerBase
 
         var task = await _tasks.GetAsync(id, ct);
         return Ok(ApiResponse<AcsTaskDto>.Ok(AcsTaskDto.From(task!), "任务已取消"));
+    }
+
+    /// <summary>分页接口里"只看来源为空（调用方直接调控制器）"的过滤写法。</summary>
+    private const string DirectSourceFilter = "direct";
+
+    /// <summary>解析 entity 过滤参数（无效值直接报 400）。</summary>
+    private static AcsTaskEntityType? ParseEntityFilter(string? entity)
+    {
+        if (string.IsNullOrWhiteSpace(entity))
+        {
+            return null;
+        }
+
+        if (!Enum.TryParse<AcsTaskEntityType>(entity, ignoreCase: true, out var parsedEntity))
+        {
+            throw new IsupApiException($"无效的 entity：{entity}（应为 Person / Card / Face / FaceLibrary）。");
+        }
+
+        return parsedEntity;
+    }
+
+    /// <summary>解析 status 过滤参数（无效值直接报 400）。</summary>
+    private static AcsTaskStatus? ParseStatusFilter(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return null;
+        }
+
+        if (!Enum.TryParse<AcsTaskStatus>(status, ignoreCase: true, out var parsedStatus))
+        {
+            throw new IsupApiException($"无效的 status：{status}（应为 Pending / Running / Succeeded / Failed / Canceled）。");
+        }
+
+        return parsedStatus;
     }
 }

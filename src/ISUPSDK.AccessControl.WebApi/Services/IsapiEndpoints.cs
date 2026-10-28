@@ -21,6 +21,8 @@ public static class IsapiEndpoints
     // ------------------------------------------------------------------ 卡片
     public const string CardInfoRecord = "/ISAPI/AccessControl/CardInfo/Record";
     public const string CardInfoModify = "/ISAPI/AccessControl/CardInfo/Modify";
+    /// <summary>卡片整体覆盖（PUT，与平台同步下发的报文一致；支持 deleteCard 标记）。</summary>
+    public const string CardInfoSetUp = "/ISAPI/AccessControl/CardInfo/SetUp";
     public const string CardInfoDelete = "/ISAPI/AccessControl/CardInfo/Delete";
     public const string CardInfoSearch = "/ISAPI/AccessControl/CardInfo/Search";
     public const string CardInfoCount = "/ISAPI/AccessControl/CardInfo/Count";

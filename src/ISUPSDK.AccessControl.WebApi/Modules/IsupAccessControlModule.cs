@@ -1,5 +1,6 @@
 ﻿using ISUPSDK.AccessControl.WebApi.Data;
 using ISUPSDK.AccessControl.WebApi.Data.EventStore;
+using ISUPSDK.AccessControl.WebApi.Customize;
 using ISUPSDK.AccessControl.WebApi.Services.Acs;
 using ISUPSDK.AccessControl.WebApi.Services.Events;
 using ISUPSDK.AccessControl.WebApi.Models;
@@ -7,7 +8,6 @@ using ISUPSDK.AccessControl.WebApi.Options;
 using ISUPSDK.AccessControl.WebApi.Services;
 using ISUPSDK.AccessControl.WebApi.Services.Tasks;
 using Microsoft.EntityFrameworkCore;
-
 namespace ISUPSDK.AccessControl.WebApi.Modules;
 
 /// <summary>
@@ -78,7 +78,46 @@ public static class IsupAccessControlModule
         builder.Services.AddSingleton<AcsTaskWorker>();
         builder.Services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<AcsTaskWorker>());
 
+        // 任务来源标识（X-Task-Source 请求头）：AcsTaskService 用它区分"谁创建的任务"
+        // （例如人员下发队列创建的任务 Source=person-operation）。
+        builder.Services.AddHttpContextAccessor();
+
+        // ---- 人员下发队列（Customize）：人员增删改先入库，再由定时任务入队为 AcsTask 下发 ----
+        // 队列库（isup_person_queue.db）配置节：Settings:Database；队列行为：Settings:PersonOperationQueue。
+        // 入队是**进程内直接调 AcsTaskService**（不经过控制器/HTTP）；
+        // 一条人员操作 = 一条 AcsTask（PersonIssue / PersonIssueDelete），
+        // 由 AcsTaskExecutor 按 人员 → 卡 → 人脸 顺序下发（设备要求先有人员）。
+        builder.Services.AddSingleton<PersonOperationTaskGateway>();
+        builder.Services.AddSingleton<PersonOperationExecutor>();
+        builder.Services.AddHostedService<PersonOperationCronJob>();        // 入队（不等设备执行）
+        builder.Services.AddHostedService<PersonOperationResultCronJob>();  // 收任务结果 + 回传平台
+        builder.Services.AddHostedService<PersonDeleteVerifyCronJob>();     // 删除兜底
+
         return builder;
+    }
+
+    /// <summary>
+    /// 宿主启动完成后初始化人员下发队列（<c>isup_person_queue.db</c>）。
+    /// <para>
+    /// 队列的数据库配置来自 <c>Settings</c> 节，而 <c>IsupSdkRuntime.CurrentSettings</c> 要等
+    /// <c>IsupSdkHostedService</c> 启动后才绑定，故挂在 <c>ApplicationStarted</c> 上（此时所有 HostedService 已启动）。
+    /// </para>
+    /// </summary>
+    public static WebApplication InitPersonOperationQueue(this WebApplication app)
+    {
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            try
+            {
+                PersonOperationQueueStartup.EnsureInitialized(app.Services.GetRequiredService<IsupSdkRuntime>());
+            }
+            catch (Exception ex)
+            {
+                app.Logger.LogError(ex, "人员下发队列初始化失败，Customize 将回退为实时下发（Distribute）。");
+            }
+        });
+
+        return app;
     }
 
     /// <summary>确保任务库与事件库的表已创建（轻量场景直接用 EnsureCreated）。</summary>
@@ -104,6 +143,23 @@ public static class IsupAccessControlModule
             try
             {
                 taskDb.Database.ExecuteSqlRaw(addPayloadFormatColumn);
+            }
+            catch (Exception)
+            {
+                // 列已存在（含刚建好的新库）—— 忽略。
+            }
+
+            // 老库升级：补齐任务来源标识列（X-Task-Source → AcsTask.Source），
+            // 用于区分"人员下发队列创建的任务"和"调用方直接调控制器创建的任务"。
+            var addSourceColumn = taskDb.Database.IsSqlServer()
+                ? "ALTER TABLE AcsTasks ADD Source nvarchar(64) NULL"
+                : taskDb.Database.IsMySql()
+                    ? "ALTER TABLE AcsTasks ADD COLUMN Source varchar(64) NULL"
+                    : "ALTER TABLE AcsTasks ADD COLUMN Source TEXT NULL";
+
+            try
+            {
+                taskDb.Database.ExecuteSqlRaw(addSourceColumn);
             }
             catch (Exception)
             {

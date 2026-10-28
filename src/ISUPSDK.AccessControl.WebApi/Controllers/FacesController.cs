@@ -101,7 +101,7 @@ public sealed class FacesController : AccessControlControllerBase
             form.TimeoutMs,
             binaryPath,
             $"下发人脸 {form.FpId}",
-            ct);
+            ct: ct);
 
         return AcceptedTask(task);
     }
@@ -131,7 +131,7 @@ public sealed class FacesController : AccessControlControllerBase
             request.TimeoutMs,
             binaryPath,
             $"下发人脸 {request.FpId}",
-            ct);
+            ct: ct);
 
         return AcceptedTask(task);
     }
@@ -187,7 +187,7 @@ public sealed class FacesController : AccessControlControllerBase
             timeoutMs,
             JsonSerializer.Serialize(paths, IsupJson.Options),
             $"批量下发人脸 {items.Count} 条",
-            ct);
+            ct: ct);
 
         return AcceptedTask(task);
     }

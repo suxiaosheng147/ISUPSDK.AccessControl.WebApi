@@ -15,6 +15,7 @@ public sealed class AcsTaskService
     private readonly IDbContextFactory<AcsTaskDbContext> _factory;
     private readonly AcsTaskQueueOptions _options;
     private readonly ILogger<AcsTaskService> _logger;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
     /// <summary>
     /// 单实例内串行化"取任务"（减少同一实例并发调用时的无谓争抢）；
@@ -25,16 +26,33 @@ public sealed class AcsTaskService
     public AcsTaskService(
         IDbContextFactory<AcsTaskDbContext> factory,
         IOptions<AcsTaskQueueOptions> options,
-        ILogger<AcsTaskService> logger)
+        ILogger<AcsTaskService> logger,
+        IHttpContextAccessor httpContextAccessor)
     {
         _factory = factory;
         _options = options.Value;
         _logger = logger;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public bool IsEnabled => _options.Enabled;
 
     /// <summary>把一次写操作入队，返回任务（含自增 ID）。</summary>
+    /// <param name="deviceId">目标设备 ID（序列号）。</param>
+    /// <param name="entity">对象类型。</param>
+    /// <param name="operation">操作类型。</param>
+    /// <param name="payload">请求载荷。</param>
+    /// <param name="timeoutMs">透传超时（毫秒）。</param>
+    /// <param name="binaryPath">人脸图片等本地文件路径。</param>
+    /// <param name="description">可读描述。</param>
+    /// <param name="source">
+    /// 任务来源标识：为空时取请求头 <c>X-Task-Source</c>（调用方直接调控制器通常为空；
+    /// 进程内调用时显式传，例如 <see cref="AcsTaskSources.PersonOperation"/>）。
+    /// </param>
+    /// <param name="ct">取消令牌。</param>
+    /// <remarks>
+    /// 任务来源（<see cref="AcsTask.Source"/>）便于在 <c>/api/tasks</c> 里区分"谁创建的任务"。
+    /// </remarks>
     public async Task<AcsTask> EnqueueAsync(
         string deviceId,
         AcsTaskEntityType entity,
@@ -43,6 +61,7 @@ public sealed class AcsTaskService
         uint timeoutMs,
         string? binaryPath = null,
         string? description = null,
+        string? source = null,
         CancellationToken ct = default)
     {
         var now = DateTimeOffset.UtcNow;
@@ -61,6 +80,7 @@ public sealed class AcsTaskService
             MaxAttempts = Math.Max(_options.MaxAttempts, 1),
             CreatedAt = now,
             NextAttemptAt = now,
+            Source = ResolveSource(source),
             Description = description,
         };
 
@@ -69,12 +89,29 @@ public sealed class AcsTaskService
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "任务已入队：Id={Id}，设备={DeviceId}，操作={Operation}",
+            "任务已入队：Id={Id}，设备={DeviceId}，操作={Operation}，来源={Source}",
             task.Id,
             task.DeviceId,
-            task.Operation);
+            task.Operation,
+            task.Source ?? "direct");
 
         return task;
+    }
+
+    /// <summary>任务来源：显式传入优先，否则取当前请求头 <c>X-Task-Source</c>（都没有则为 null）。</summary>
+    private string? ResolveSource(string? source)
+    {
+        var value = string.IsNullOrWhiteSpace(source)
+            ? _httpContextAccessor.HttpContext?.Request.Headers[AcsTaskSources.HeaderName].FirstOrDefault()
+            : source;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        value = value!.Trim();
+        return value.Length <= 64 ? value : value[..64];
     }
 
     /// <summary>把人脸图片等二进制附件保存到本地磁盘，返回文件路径（入队时调用）。</summary>
@@ -134,6 +171,90 @@ public sealed class AcsTaskService
             .Take(Math.Clamp(limit, 1, 500))
             .ToListAsync(ct)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 分页查询任务（按创建时间倒序，最新在前）。
+    /// <para>
+    /// 过滤条件全部在数据库侧执行（<c>COUNT</c> + <c>SKIP/TAKE</c>），不会把整表读进内存。
+    /// </para>
+    /// </summary>
+    /// <param name="pageIndex">页码（从 1 开始，已由调用方归一到 &gt;= 1）。</param>
+    /// <param name="pageSize">每页条数（已由调用方限制在 1~200）。</param>
+    /// <param name="deviceId">按设备过滤（可选）。</param>
+    /// <param name="entity">按对象类型过滤（可选）。</param>
+    /// <param name="status">按状态过滤（可选）。</param>
+    /// <param name="source">
+    /// 按来源过滤（可选）：空字符串表示"来源为空"（调用方直接调控制器创建的任务），
+    /// 其余值按等值匹配（例如 <c>person-operation</c>）。
+    /// </param>
+    /// <param name="createdFrom">创建时间下限（含，可选）。</param>
+    /// <param name="createdTo">创建时间上限（含，可选）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>当前页数据与符合条件的总条数。</returns>
+    public async Task<(List<AcsTask> Items, int Total)> ListPagedAsync(
+        int pageIndex,
+        int pageSize,
+        string? deviceId,
+        AcsTaskEntityType? entity,
+        AcsTaskStatus? status,
+        string? source,
+        DateTimeOffset? createdFrom,
+        DateTimeOffset? createdTo,
+        CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        var query = db.Tasks.AsNoTracking().AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(deviceId))
+        {
+            query = query.Where(t => t.DeviceId == deviceId);
+        }
+
+        if (entity is { } e)
+        {
+            query = query.Where(t => t.Entity == e);
+        }
+
+        if (status is { } s)
+        {
+            query = query.Where(t => t.Status == s);
+        }
+
+        if (source is not null)
+        {
+            // 空字符串 = "来源为空"（调用方直接调控制器创建的任务）
+            query = source.Length == 0
+                ? query.Where(t => t.Source == null || t.Source == string.Empty)
+                : query.Where(t => t.Source == source);
+        }
+
+        if (createdFrom is { } from)
+        {
+            query = query.Where(t => t.CreatedAt >= from);
+        }
+
+        if (createdTo is { } to)
+        {
+            query = query.Where(t => t.CreatedAt <= to);
+        }
+
+        var total = await query.CountAsync(ct).ConfigureAwait(false);
+
+        // 页码可能被传得很大，SKIP 用 long 算完再截断，避免 (pageIndex - 1) * pageSize 溢出 int
+        var skip = (int)Math.Min((long)(pageIndex - 1) * pageSize, int.MaxValue);
+
+        var items = total == 0 || skip >= total
+            ? new List<AcsTask>()
+            : await query
+                .OrderByDescending(t => t.CreatedAt)
+                .ThenByDescending(t => t.Id)
+                .Skip(skip)
+                .Take(pageSize)
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+
+        return (items, total);
     }
 
     /// <summary>把失败/取消的任务重新排队执行。</summary>
